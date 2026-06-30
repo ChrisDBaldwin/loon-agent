@@ -73,6 +73,19 @@ def test_loon_agent_invoke_returns_final_text() -> None:
     assert reply == "The answer is 4."
 
 
+def test_loon_agent_stream_yields_tool_call_result_then_final() -> None:
+    agent = LoonAgent(_scripted_model(), DEFAULT_TOOLS, checkpointer=MemorySaver())
+    messages = list(agent.stream("what is 2+2?", session_key="cli:stream"))
+
+    # The tool call, its result, and a final tool-call-free answer all stream through.
+    assert any(isinstance(m, AIMessage) and m.tool_calls for m in messages)
+    tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
+    assert [m.content for m in tool_messages] == ["4"]
+    assert isinstance(messages[-1], AIMessage)
+    assert not messages[-1].tool_calls
+    assert messages[-1].content == "The answer is 4."
+
+
 def test_no_tool_call_routes_straight_to_end() -> None:
     model = FakeToolModel(responses=[AIMessage(content="hello, no tools needed")])
     graph = build_graph(model, DEFAULT_TOOLS, checkpointer=MemorySaver())

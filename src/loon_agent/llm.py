@@ -1,8 +1,9 @@
 """LLM construction: one ``ChatOpenAI`` pointed at any homelab backend.
 
 We use ``ChatOpenAI`` (not ``langchain_community.VLLMOpenAI``) deliberately — only
-``ChatOpenAI`` supports ``bind_tools``, which the agent loop needs. Local servers ignore
-the API key but the SDK still requires a non-empty value.
+``ChatOpenAI`` supports ``bind_tools``, which the agent loop needs. Most local servers
+ignore auth (the SDK still requires a non-empty value), but a backend can carry a real
+token via ``LOON_<NAME>_API_KEY`` — e.g. LM Studio with API-token auth enabled.
 """
 
 from __future__ import annotations
@@ -10,9 +11,6 @@ from __future__ import annotations
 from langchain_openai import ChatOpenAI
 
 from .config import Settings, get_settings
-
-# Local OpenAI-compatible servers ignore auth; the SDK just needs a non-empty key.
-_LOCAL_API_KEY = "not-needed"
 
 
 def make_llm(
@@ -31,7 +29,7 @@ def make_llm(
     params: dict[str, object] = {
         "model": target.model,
         "base_url": target.base_url,
-        "api_key": _LOCAL_API_KEY,
+        "api_key": target.api_key,
         "temperature": settings.temperature,
     }
     params.update(kwargs)

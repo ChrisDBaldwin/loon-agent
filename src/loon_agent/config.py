@@ -16,15 +16,23 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 load_dotenv()
 
 
+# Local OpenAI-compatible servers usually ignore auth; the SDK just needs a non-empty key.
+# LM Studio with "API token authentication" enabled is the exception — set a real token via
+# LOON_<NAME>_API_KEY for those backends.
+_LOCAL_API_KEY = "not-needed"
+
+
 @dataclass(frozen=True)
 class Backend:
     """An OpenAI-compatible inference endpoint."""
 
     base_url: str
     model: str
+    api_key: str = _LOCAL_API_KEY
 
 
-# Default homelab backends. Override per-field via LOON_<NAME>_BASE_URL / LOON_<NAME>_MODEL.
+# Default homelab backends. Override per-field via
+# LOON_<NAME>_BASE_URL / LOON_<NAME>_MODEL / LOON_<NAME>_API_KEY.
 DEFAULT_BACKENDS: dict[str, Backend] = {
     "pontoon": Backend("http://pontoon.lan:1234/v1", "mlx-community/Qwen2.5-7B-Instruct-4bit"),
     "ironwood": Backend("http://ironwood.lan:8000/v1", "Qwen/Qwen2.5-14B-Instruct-AWQ"),
@@ -46,10 +54,13 @@ class Settings(BaseSettings):
     # Per-backend overrides (None -> use DEFAULT_BACKENDS value).
     pontoon_base_url: str | None = None
     pontoon_model: str | None = None
+    pontoon_api_key: str | None = None
     ironwood_base_url: str | None = None
     ironwood_model: str | None = None
+    ironwood_api_key: str | None = None
     wsl_base_url: str | None = None
     wsl_model: str | None = None
+    wsl_api_key: str | None = None
 
     def backends(self) -> dict[str, Backend]:
         """Resolved backend registry, applying any env overrides over the defaults."""
@@ -57,7 +68,8 @@ class Settings(BaseSettings):
         for name, default in DEFAULT_BACKENDS.items():
             base_url = getattr(self, f"{name}_base_url") or default.base_url
             model = getattr(self, f"{name}_model") or default.model
-            resolved[name] = Backend(base_url, model)
+            api_key = getattr(self, f"{name}_api_key") or default.api_key
+            resolved[name] = Backend(base_url, model, api_key)
         return resolved
 
     def resolve_backend(self, name: str | None = None) -> Backend:

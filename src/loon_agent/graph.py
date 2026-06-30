@@ -127,7 +127,8 @@ class LoonAgent:
         """
         config = {"configurable": {"thread_id": session_key}}
         reply = ""
-        for _node, update in self.graph.stream(
+        # stream_mode="updates" yields one dict per super-step: {node_name: {"messages": [...]}}.
+        for update in self.graph.stream(
             {"messages": [HumanMessage(text)]}, config, stream_mode="updates"
         ):
             for value in update.values():
