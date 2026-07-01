@@ -14,6 +14,7 @@ dependencies = [
     "opentelemetry-sdk>=1.30",
     "opentelemetry-exporter-otlp>=1.30",
     "openinference-instrumentation-langchain>=0.1",
+    "python-telegram-bot>=22.0",
 ]
 
 [project.scripts]

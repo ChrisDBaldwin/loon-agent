@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     # off | console | otlp
     otel: str = "off"
 
+    # Telegram adapter (see adapters/telegram.py).
+    telegram_token: str | None = None
+    # Comma-separated numeric Telegram user ids. Empty -> deny everyone (safe default);
+    # the refusal message includes the sender's id, which is how you discover yours.
+    telegram_allowed_users: str = ""
+
     # Per-backend overrides (None -> use DEFAULT_BACKENDS value).
     pontoon_base_url: str | None = None
     pontoon_model: str | None = None
@@ -61,6 +67,21 @@ class Settings(BaseSettings):
     wsl_base_url: str | None = None
     wsl_model: str | None = None
     wsl_api_key: str | None = None
+
+    def telegram_allowlist(self) -> frozenset[int]:
+        """Numeric user ids allowed to talk to the Telegram bot (empty = deny all)."""
+        ids = set()
+        for part in self.telegram_allowed_users.split(","):
+            part = part.strip()
+            if part:
+                try:
+                    ids.add(int(part))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"LOON_TELEGRAM_ALLOWED_USERS must be comma-separated numeric "
+                        f"Telegram user ids; got {part!r}"
+                    ) from exc
+        return frozenset(ids)
 
     def backends(self) -> dict[str, Backend]:
         """Resolved backend registry, applying any env overrides over the defaults."""

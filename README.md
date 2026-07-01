@@ -39,9 +39,10 @@ START → agent → (tool calls?) ──yes──→ tools → agent → …
 - A SQLite **checkpointer** makes each `thread_id` a durable conversation; the
   `MemoryProvider` injects recall *before* the turn and writes the turn back *after*.
 
-Adapters (CLI now, Telegram later) only normalize input into a platform-neutral
+Adapters (CLI and Telegram) only normalize input into a platform-neutral
 `MessageEvent` and derive a stable `thread_id` via `build_session_key` — the agent core
-never needs to know which platform a message came from.
+never needs to know which platform a message came from. On Telegram each DM, group,
+and forum topic maps to its own durable conversation.
 
 ## Quickstart
 
@@ -49,6 +50,15 @@ never needs to know which platform a message came from.
 uv sync                       # install deps
 cp .env.example .env          # set LOON_BACKEND to whichever box is up
 uv run python -m loon_agent   # launch the CLI REPL
+```
+
+Or run it as a Telegram bot (long-polling; no public ingress needed):
+
+```bash
+# 1. Create a bot with @BotFather, put the token in .env as LOON_TELEGRAM_TOKEN.
+# 2. Start the bot and DM it — it replies with your numeric user id.
+# 3. Put that id in LOON_TELEGRAM_ALLOWED_USERS and restart. Deny-by-default.
+uv run python -m loon_agent telegram
 ```
 
 Smoke-test a backend directly:
@@ -70,6 +80,8 @@ Settings come from the environment / `.env` (prefix `LOON_`); defaults live in
 | `LOON_<NAME>_API_KEY`    | bearer token for that backend (see auth note below)  |
 | `LOON_TEMPERATURE`       | sampling temperature                                 |
 | `LOON_DATA_DIR`          | where the checkpointer + long-term memory live       |
+| `LOON_TELEGRAM_TOKEN`    | bot token from @BotFather (telegram adapter)         |
+| `LOON_TELEGRAM_ALLOWED_USERS` | comma-separated numeric user ids; empty = deny all |
 | `LOON_OTEL`              | telemetry mode: `off` (default) / `console` / `otlp` |
 
 Most local servers ignore auth, so the API key defaults to a placeholder. Set
@@ -110,7 +122,7 @@ src/loon_agent/
   tools/        @tool definitions (DEFAULT_TOOLS)
   memory/       MemoryProvider interface + SQLite/FTS5 impl
   session.py    SessionSource / MessageEvent / build_session_key
-  adapters/     cli.py (REPL); telegram later
+  adapters/     cli.py (REPL) + telegram.py (long-polling bot, allowlist auth)
   telemetry.py  OpenTelemetry gen_ai wiring
 ```
 
@@ -123,7 +135,8 @@ An early scaffold — the architecture is in place, but capability and hardening
 - **Memory recall is keyword-only** — `prefetch` is an OR of tokens over FTS5, and it is
   not yet scoped to the session (it can surface exchanges from other conversations). No
   embeddings / semantic recall yet; an OpenViking provider is the planned upgrade.
-- **One adapter** — CLI only; the Telegram adapter is designed-for but not built.
+- **Telegram is text-only** — no media/voice handling, no streaming edits; replies are
+  chunked plain text. Group use needs BotFather privacy mode off (or @-mentions).
 - **No token streaming** — `stream()` yields per-node message updates, not tokens.
 - **Few guards** — no `max_tokens` / iteration cap, no retries around LLM calls, and the
   checkpointed history never compacts.
