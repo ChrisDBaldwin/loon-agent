@@ -90,7 +90,7 @@ class SkillRunner:
                     )
                 context[step.output] = self._run_foreach(skill, step, context, items, failures)
             else:
-                context[step.output] = self._run_single(skill, step, context)
+                context[step.output] = self._run_single(skill, step, context, failures=failures)
             logger.info("skill %s: step %s done", skill.name, step.name)
 
         return RunResult(outputs=context, failures=failures)
@@ -130,12 +130,16 @@ class SkillRunner:
         step: Step,
         context: Mapping[str, object],
         item: object | None = None,
+        failures: list[str] | None = None,
     ) -> object:
         if step.kind == "tool":
             # Existence was checked in run(); contract: foreach tools receive the item,
-            # whole-pipeline tools receive the full context mapping.
+            # whole-pipeline tools receive the full context mapping (plus the skips
+            # accumulated so far, so e.g. a publish step can report them).
             fn = self.tools[step.tool]
-            return fn(item if step.foreach is not None else dict(context))
+            if step.foreach is not None:
+                return fn(item)
+            return fn({**context, "failures": list(failures or [])})
 
         template = skill.templates[step.name]
         variables = dict(context)

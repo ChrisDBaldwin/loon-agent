@@ -1,12 +1,15 @@
-"""Application assembly: wire settings -> llm, tools, checkpointer, memory, telemetry.
+"""Application assembly: wire settings -> llm, tools, checkpointer, memory, skills.
 
-Kept separate from any single adapter so the CLI now (and Telegram later) build the same
-agent the same way.
+Kept separate from any single adapter so the CLI and Telegram build the same runtime
+the same way. ``build_agent`` remains the light entry point for chat-only adapters;
+``build_runtime`` adds the skill engine (discovered skills, tool registry, masques).
 """
 
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -14,13 +17,35 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from .config import Settings, get_settings
 from .graph import LoonAgent
 from .llm import make_llm
+from .masques import MasqueLoader
 from .memory import SqliteMemoryProvider
+from .memory.provider import MemoryProvider
+from .report import render_report, write_report
+from .skills import Skill, discover_skills
+from .skills.engine import SkillRunner
 from .telemetry import setup_telemetry
 from .tools import DEFAULT_TOOLS
+from .tools.web import FetchedPage, fetch_page, web_search
+
+_MEMORY_TLDR_CHARS = 400
 
 
-def build_agent(settings: Settings | None = None) -> LoonAgent:
-    """Construct a fully-wired :class:`LoonAgent` from settings."""
+@dataclass
+class LoonRuntime:
+    """Everything an adapter needs: the chat agent plus the skill machinery."""
+
+    agent: LoonAgent
+    skills: dict[str, Skill]
+    runner: SkillRunner
+    settings: Settings
+
+
+def build_runtime(
+    settings: Settings | None = None,
+    *,
+    progress: Callable[[str], None] | None = None,
+) -> LoonRuntime:
+    """Construct the fully-wired runtime (agent + skills) from settings."""
     settings = settings or get_settings()
     setup_telemetry(settings)
 
@@ -37,5 +62,88 @@ def build_agent(settings: Settings | None = None) -> LoonAgent:
         notes_path=data_dir / "MEMORY.md",
     )
 
+    # Local masques/ wins on collisions; LOON_MASQUES_DIR extends the catalog
+    # (e.g. point it at ~/git/masques/personas).
+    masque_dirs: list[Path] = [Path("masques")]
+    if settings.masques_dir:
+        masque_dirs.append(Path(settings.masques_dir))
+    masques = MasqueLoader(masque_dirs)
+    persona = masques.block(settings.masque) if settings.masque else None
+
     llm = make_llm(settings=settings)
-    return LoonAgent(llm, DEFAULT_TOOLS, checkpointer=checkpointer, memory=memory)
+    agent = LoonAgent(
+        llm, DEFAULT_TOOLS, checkpointer=checkpointer, memory=memory, persona=persona
+    )
+
+    backend = settings.resolve_backend()
+    tools = {
+        "web_search": lambda query: web_search(str(query)),
+        "fetch_page": _fetch_or_raise,
+        "publish_report": _make_publish(memory, settings, model_label=backend.model),
+    }
+    runner = SkillRunner(
+        llm,
+        tools,
+        masque_loader=masques.block,
+        input_budget=settings.step_input_budget,
+        max_output_tokens=settings.step_max_tokens,
+        progress=progress,
+    )
+
+    return LoonRuntime(
+        agent=agent,
+        skills=discover_skills(settings.skills_dir),
+        runner=runner,
+        settings=settings,
+    )
+
+
+def build_agent(settings: Settings | None = None) -> LoonAgent:
+    """Construct just the chat agent (chat-only adapters)."""
+    return build_runtime(settings).agent
+
+
+# --- skill tools ------------------------------------------------------------------
+
+
+def _fetch_or_raise(url: object) -> FetchedPage:
+    """fetch_page for foreach use: bad urls / failed fetches raise so the item is
+    skipped and recorded, keeping only readable pages in the pipeline."""
+    url = str(url).strip()
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"not a url: {url!r}")
+    page = fetch_page(url)
+    if not page.ok:
+        raise RuntimeError(page.error)
+    return page
+
+
+def _make_publish(
+    memory: MemoryProvider | None, settings: Settings, *, model_label: str
+) -> Callable[[Mapping[str, object]], str]:
+    def publish_report(context: Mapping[str, object]) -> str:
+        topic = str(context.get("topic", "untitled"))
+        briefing = str(context.get("briefing", ""))
+        pages = [p for p in context.get("pages") or [] if isinstance(p, FetchedPage)]
+        failures = [str(f) for f in context.get("failures") or []]
+
+        html_text = render_report(
+            topic=topic,
+            briefing_md=briefing,
+            pages=pages,
+            failures=failures,
+            model=model_label,
+            backend=settings.backend,
+        )
+        path = write_report(html_text, topic, Path(settings.data_dir) / "reports")
+
+        if memory is not None:
+            tldr = briefing.strip()[:_MEMORY_TLDR_CHARS]
+            memory.sync_turn(
+                f"research: {topic}",
+                f"{tldr}\n\nfull report: {path}",
+                session_id="skill:research",
+            )
+        return str(path)
+
+    return publish_report
