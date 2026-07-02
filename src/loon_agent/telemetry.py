@@ -70,9 +70,20 @@ def setup_telemetry(settings: Settings) -> None:
             ConsoleMetricExporter(), export_interval_millis=60_000
         )
     else:  # otlp
-        # grpc exporters; read OTEL_EXPORTER_OTLP_ENDPOINT (default http://localhost:4317).
-        from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
-        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+        # Exporters read OTEL_EXPORTER_OTLP_ENDPOINT. Protocol comes from
+        # OTEL_EXPORTER_OTLP_PROTOCOL (grpc | http/protobuf); when unset, infer it from
+        # the endpoint's conventional port — :4318 is OTLP/HTTP, :4317 (or none) is gRPC.
+        protocol = os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "").strip().lower()
+        if not protocol:
+            endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+            protocol = "http/protobuf" if ":4318" in endpoint else "grpc"
+
+        if protocol == "grpc":
+            from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+        else:
+            from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
         tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
         metric_reader = PeriodicExportingMetricReader(OTLPMetricExporter())
