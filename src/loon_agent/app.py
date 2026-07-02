@@ -64,7 +64,7 @@ def build_runtime(
     )
 
     # Local masques/ wins on collisions; LOON_MASQUES_DIR extends the catalog
-    # (e.g. point it at ~/git/masques/personas).
+    # (point it at any masques-style personas directory).
     masque_dirs: list[Path] = [Path("masques")]
     if settings.masques_dir:
         masque_dirs.append(Path(settings.masques_dir))

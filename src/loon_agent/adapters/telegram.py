@@ -8,7 +8,7 @@ its own durable checkpointed conversation.
 
 Local-model realities: the turn runs in a worker thread (``asyncio.to_thread``) so the
 sync agent never blocks the event loop, a background task keeps the ``typing…``
-indicator alive through pontoon-style cold starts, and replies are chunked at
+indicator alive through local-model cold starts, and replies are chunked at
 Telegram's 4096-char limit.
 """
 

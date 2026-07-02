@@ -2,19 +2,18 @@
 
 A from-scratch LangGraph agent for the homelab — a learning-first project to get
 comfortable building an LLM agent end to end (agent loop, tools, memory, telemetry,
-chat interface) and run it on my own hardware.
+chat interface) and run it on your own hardware.
 
 ## What it is
 
 - **Hand-rolled ReAct loop** built directly on `langgraph.StateGraph` (no `create_agent`
   prebuilt) so the agent loop is fully visible and hackable.
 - **Backend-agnostic.** One `ChatOpenAI(base_url=...)` interface talks to any
-  OpenAI-compatible endpoint. Three homelab backends are pre-configured:
-  | name       | host                       | example model                            |
-  |------------|----------------------------|------------------------------------------|
-  | `pontoon`  | MacBook M5 (LM Studio/MLX) | `mlx-community/Qwen2.5-7B-Instruct-4bit`  |
-  | `ironwood` | 3080 Ti (vLLM)             | `Qwen/Qwen2.5-14B-Instruct-AWQ`          |
-  | `wsl`      | this box, WSL2 (vLLM)      | `Qwen/Qwen2.5-7B-Instruct-AWQ`           |
+  OpenAI-compatible endpoint — LM Studio, vLLM, Ollama, llama.cpp server, or a hosted
+  API. Backends are defined entirely in `.env`: `LOON_<NAME>_BASE_URL` creates a
+  backend, `LOON_<NAME>_MODEL` / `LOON_<NAME>_API_KEY` fill it in, and `LOON_BACKEND`
+  picks which one to use. A `local` backend pointing at `http://localhost:1234/v1`
+  (LM Studio's default port) ships out of the box.
 - **Swappable memory** behind a `MemoryProvider` interface (patterned on
   Nous Research's hermes-agent: `system_prompt_block` / `prefetch` / `sync_turn`).
   Default impl is SQLite FTS5 + a markdown notes file — OpenViking can be added later
@@ -54,8 +53,16 @@ and forum topic maps to its own durable conversation.
 
 ```bash
 uv sync                       # install deps
-cp .env.example .env          # set LOON_BACKEND to whichever box is up
+cp .env.example .env          # point a backend at your inference server
 uv run python -m loon_agent   # launch the CLI REPL
+```
+
+Minimum viable `.env` (LM Studio or any OpenAI-compatible server on this machine):
+
+```bash
+LOON_BACKEND=local
+LOON_LOCAL_MODEL=<the model id your server is serving>
+# LOON_LOCAL_BASE_URL=http://localhost:1234/v1   # override if not LM Studio's default
 ```
 
 Or run it as a Telegram bot (long-polling; no public ingress needed):
@@ -70,25 +77,26 @@ uv run python -m loon_agent telegram
 Smoke-test a backend directly:
 
 ```bash
-uv run python -c "from loon_agent.llm import make_llm; print(make_llm('wsl').invoke('say hi').content)"
+uv run python -c "from loon_agent.llm import make_llm; print(make_llm().invoke('say hi').content)"
 ```
 
 ## Configuration
 
 Settings come from the environment / `.env` (prefix `LOON_`); defaults live in
-`src/loon_agent/config.py`. Each backend can be overridden per-field:
+`src/loon_agent/config.py`. Any `LOON_<NAME>_BASE_URL` defines a backend named
+`<name>` (alphanumeric), so you can register as many inference boxes as you have:
 
 | variable                 | purpose                                             |
 |--------------------------|-----------------------------------------------------|
-| `LOON_BACKEND`           | which backend to use (`pontoon` / `ironwood` / `wsl`) |
-| `LOON_<NAME>_BASE_URL`   | override a backend's OpenAI-compatible base URL      |
-| `LOON_<NAME>_MODEL`      | override a backend's model id                        |
+| `LOON_BACKEND`           | name of the backend to use (default `local`)         |
+| `LOON_<NAME>_BASE_URL`   | define backend `<name>` at this OpenAI-compatible URL |
+| `LOON_<NAME>_MODEL`      | model id that backend serves (required to use it)    |
 | `LOON_<NAME>_API_KEY`    | bearer token for that backend (see auth note below)  |
 | `LOON_TEMPERATURE`       | sampling temperature                                 |
 | `LOON_DATA_DIR`          | where the checkpointer + long-term memory live       |
 | `LOON_TELEGRAM_TOKEN`    | bot token from @BotFather (telegram adapter)         |
 | `LOON_TELEGRAM_ALLOWED_USERS` | comma-separated numeric user ids; empty = deny all |
-| `LOON_MASQUES_DIR`       | extra masque catalog (e.g. `~/git/masques/personas`) |
+| `LOON_MASQUES_DIR`       | extra masque catalog (a masques-style personas dir)  |
 | `LOON_MASQUE`            | masque donned by the chat agent itself               |
 | `LOON_STEP_INPUT_BUDGET` | max approx tokens per skill-step prompt (default 4000) |
 | `LOON_STEP_MAX_TOKENS`   | output cap per step call (default 3000)              |
@@ -101,13 +109,19 @@ Most local servers ignore auth, so the API key defaults to a placeholder. Set
 
 ## Backend serving notes
 
-- **vLLM (ironwood / WSL2):** serve with tool-calling enabled, e.g.
+The chat loop needs a **tool-capable model** behind an OpenAI-compatible API:
+
+- **vLLM:** serve with tool-calling enabled, e.g.
   `vllm serve <model> --enable-auto-tool-choice --tool-call-parser hermes` — required for
   `bind_tools` to work.
-- **Mac (pontoon):** LM Studio's OpenAI-compatible server on `:1234`, or `mlx_lm.server`.
-  Use a tool-capable model. If LM Studio's token auth is on, set `LOON_PONTOON_API_KEY`.
-  On memory-tight machines, keep the loaded model resident (free RAM, modest context) — a
-  15 GB model that gets paged out between requests will cold-start slowly.
+- **LM Studio:** the built-in OpenAI-compatible server (default `:1234`). If
+  "API token authentication" is on, set `LOON_<NAME>_API_KEY` to the token.
+- **Ollama / llama.cpp server:** point `LOON_<NAME>_BASE_URL` at their
+  OpenAI-compatible endpoints (`/v1`).
+
+On memory-tight machines, keep the loaded model resident (free RAM, modest context) — a
+model whose weights get paged out between requests will cold-start slowly. Reasoning
+models work but spend heavily on think tokens; see the limitations section.
 
 ## Skills, masques & deep research
 
@@ -121,9 +135,9 @@ small local model does multi-source work without blowing its context window.
   LLM step. Drop a file in, no core changes.
 - **Masque (YAML, `masques/`)** — *who is doing it*: a lens+context block donned as the
   system prompt of the steps that declare it. Schema-compatible with
-  [masques](https://github.com/ChrisDBaldwin/masques); point `LOON_MASQUES_DIR` at an
-  external catalog (e.g. `~/git/masques/personas`), or don one on the chat agent itself
-  via `LOON_MASQUE`.
+  [masques](https://github.com/ChrisDBaldwin/masques); point `LOON_MASQUES_DIR` at any
+  masques-style personas directory to reuse an existing catalog, or don one on the chat
+  agent itself via `LOON_MASQUE`.
 - **Engine (`skills/engine.py`)** — enforces the input budget on every substitution,
   strips reasoning-model think-blocks, retries once per call, parses line-oriented
   output tolerantly, and skips failed `foreach` items rather than dying.
@@ -191,10 +205,10 @@ An early scaffold — the architecture is in place, but capability and hardening
   `/research`, not mid-conversation.
 - **Research trusts the web** — fetched text reaches summarize prompts unfiltered; a
   hostile page can skew a summary (report HTML stays escaped, so it can't script).
-- **Reasoning models can overthink dense sources** — on long inputs gemma sometimes
-  burns the whole output cap inside its think block (`finish_reason=length`, empty
-  content). The engine retries with a doubled cap, then skips the source and reports
-  it; expect the occasional dropped source on think-heavy models.
+- **Reasoning models can overthink dense sources** — on long inputs a reasoning model
+  sometimes burns the whole output cap inside its think block (`finish_reason=length`,
+  empty content). The engine retries with a doubled cap, then skips the source and
+  reports it; expect the occasional dropped source on think-heavy models.
 - **Memory recall is keyword-only** — `prefetch` is an OR of tokens over FTS5, and it is
   not yet scoped to the session (it can surface exchanges from other conversations). No
   embeddings / semantic recall yet; an OpenViking provider is the planned upgrade.

@@ -13,13 +13,14 @@ from loon_agent.tools import DEFAULT_TOOLS
 
 def test_loads_loon_convention_yaml(tmp_path) -> None:
     (tmp_path / "analyst.yaml").write_text(
-        "name: Analyst\nlens: |\n  Be terse.\ncontext: |\n  Helping Chris.\n", encoding="utf-8"
+        "name: Analyst\nlens: |\n  Be terse.\ncontext: |\n  Helping the operator.\n",
+        encoding="utf-8",
     )
     loader = MasqueLoader([tmp_path])
 
     masque = loader.load("analyst")
-    assert masque == Masque(name="Analyst", lens="Be terse.\n", context="Helping Chris.\n")
-    assert loader.block("analyst") == "Be terse.\n\nHelping Chris."
+    assert masque == Masque(name="Analyst", lens="Be terse.\n", context="Helping the operator.\n")
+    assert loader.block("analyst") == "Be terse.\n\nHelping the operator."
 
 
 def test_loads_masques_repo_convention_and_earlier_dir_wins(tmp_path) -> None:

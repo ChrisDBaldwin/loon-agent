@@ -1,7 +1,7 @@
 [project]
 name = "loon-agent"
 version = "0.1.0"
-description = "A from-scratch LangChain/LangGraph agent for the homelab, backend-agnostic across Pontoon (Mac M5), ironwood (3080 Ti) and WSL2 vLLM."
+description = "A from-scratch LangChain/LangGraph agent for the homelab — chat, Telegram, and deep-research skills over any OpenAI-compatible local inference server."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

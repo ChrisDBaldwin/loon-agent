@@ -17,11 +17,11 @@ def test_markdown_briefing_becomes_html_body() -> None:
         briefing_md="## TL;DR\nLoons **dive**.\n\n- fact one [1]\n- fact two [2]",
         pages=_PAGES,
         model="gemma-4-26b",
-        backend="pontoon",
+        backend="localbox",
     )
     assert "<h2>TL;DR</h2>" in out
     assert "<strong>dive</strong>" in out
-    assert "gemma-4-26b" in out and "pontoon" in out
+    assert "gemma-4-26b" in out and "localbox" in out
 
 
 def test_sources_are_numbered_links_with_url_fallback() -> None:

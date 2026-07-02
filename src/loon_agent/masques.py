@@ -1,10 +1,11 @@
 """Masque identities: YAML lenses donned per skill step or by the chat agent.
 
-Schema-compatible with ~/git/masques (the ``name`` / ``lens`` / ``context`` subset —
-attributes, knowledge, access etc. are ignored). Skills say *what to do*; a masque says
-*who is doing it*: its lens (+ context) becomes the system prompt of the LLM call that
-dons it. Point ``LOON_MASQUES_DIR`` at an external catalog (e.g. masques/personas) to
-reuse existing identities; loon-local files in ``masques/`` win on name collisions.
+Schema-compatible with https://github.com/ChrisDBaldwin/masques (the ``name`` /
+``lens`` / ``context`` subset — attributes, knowledge, access etc. are ignored). Skills
+say *what to do*; a masque says *who is doing it*: its lens (+ context) becomes the
+system prompt of the LLM call that dons it. Point ``LOON_MASQUES_DIR`` at an external
+personas catalog to reuse existing identities; loon-local files in ``masques/`` win on
+name collisions.
 
 Lookup is lenient by design: a missing masque logs a warning and the step runs bare
 rather than aborting a long research run over a costume.
