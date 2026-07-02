@@ -106,6 +106,23 @@ def test_research_pipeline_end_to_end_with_fakes(tmp_path) -> None:
     assert "TL;DR" in llm.calls[-1][0].content
 
 
+def test_cited_pages_follow_note_order_and_drop_unsummarized() -> None:
+    from loon_agent.app import _cited_pages
+
+    a = FetchedPage(url="https://a.com/x", title="A", text="…")
+    b = FetchedPage(url="https://b.com/y", title="B", text="…")
+    c = FetchedPage(url="https://c.com/z", title="C", text="…")
+    notes = [
+        "URL: https://c.com/z\n- fact",  # cited [1]
+        "URL: https://a.com/x\n- fact",  # cited [2]
+        # b produced no note (summarize skipped it) -> not listed as a source
+    ]
+
+    assert _cited_pages([a, b, c], notes) == [c, a]
+    # Model mangled every URL -> fall back to fetched order, never an empty list.
+    assert _cited_pages([a, b], ["no urls here"]) == [a, b]
+
+
 def test_fetch_or_raise_rejects_non_urls_and_failed_pages() -> None:
     with pytest.raises(ValueError, match="not a url"):
         _fetch_or_raise("Sure! Here are the URLs you asked for:")

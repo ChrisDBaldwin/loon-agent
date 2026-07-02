@@ -28,7 +28,7 @@ _THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGN
 _LINE_MARKER_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+)")
 
 DEFAULT_INPUT_BUDGET = 4_000  # approx tokens per assembled prompt
-DEFAULT_MAX_OUTPUT_TOKENS = 1_200  # reasoning models need headroom past the think block
+DEFAULT_MAX_OUTPUT_TOKENS = 3_000  # reasoning models can burn 700+ tokens thinking on easy steps
 DEFAULT_MAX_LINES = 8  # hard cap on parse:lines output, whatever the model says
 _LLM_ATTEMPTS = 2
 
@@ -59,7 +59,8 @@ class SkillRunner:
         max_lines: int = DEFAULT_MAX_LINES,
         progress: Callable[[str], None] | None = None,
     ) -> None:
-        self.llm = llm.bind(max_tokens=max_output_tokens)
+        self.llm = llm
+        self.max_output_tokens = max_output_tokens
         self.tools = dict(tools)
         self.masque_loader = masque_loader
         self.input_budget = input_budget
@@ -183,12 +184,19 @@ class SkillRunner:
 
         last_error: Exception | None = None
         for attempt in range(_LLM_ATTEMPTS):
+            # Escalate the output budget on retry: a reasoning model that spent the whole
+            # cap inside its think block returns empty content, and an identical retry
+            # would fail identically.
+            budget = self.max_output_tokens * (attempt + 1)
             try:
-                response = self.llm.invoke(messages)
+                response = self.llm.invoke(messages, max_tokens=budget)
                 text = _strip_think(_message_text(response)).strip()
                 if text:
                     return text
-                last_error = SkillRunError("model returned empty text")
+                finish = getattr(response, "response_metadata", {}).get("finish_reason")
+                last_error = SkillRunError(
+                    f"model returned empty text (finish_reason={finish}, max_tokens={budget})"
+                )
             except Exception as exc:  # noqa: BLE001 - retry once on any backend hiccup
                 last_error = exc
             logger.warning("step %r llm attempt %d failed: %s", step.name, attempt + 1, last_error)

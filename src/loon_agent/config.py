@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     masques_dir: Path | None = None  # extra masque catalog (e.g. ~/git/masques/personas)
     masque: str | None = None  # optional lens donned by the chat agent itself
     step_input_budget: int = 4000  # approx tokens per assembled skill-step prompt
-    step_max_tokens: int = 1200  # output cap per step call (reasoning needs headroom)
+    step_max_tokens: int = 3000  # output cap per step call (reasoning needs headroom)
     research_sources: int = 5  # pages fetched/summarized per research run
 
     # Telegram adapter (see adapters/telegram.py).

@@ -7,6 +7,7 @@ the same way. ``build_agent`` remains the light entry point for chat-only adapte
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -105,6 +106,30 @@ def build_agent(settings: Settings | None = None) -> LoonAgent:
 
 # --- skill tools ------------------------------------------------------------------
 
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _cited_pages(pages: list[FetchedPage], notes: object) -> list[FetchedPage]:
+    """Reorder pages to match the notes' citation order (each note leads with its URL).
+
+    Pages that produced no note (summarize skipped them) drop out — they are already
+    listed under failures. If no note can be matched back to a page (the model mangled
+    the URLs), fall back to the fetched order rather than an empty source list.
+    """
+    remaining = list(pages)
+    ordered: list[FetchedPage] = []
+    for note in notes if isinstance(notes, list) else []:
+        match = _URL_RE.search(str(note))
+        if not match:
+            continue
+        url = match.group(0).rstrip(".,;)")
+        for page in remaining:
+            if page.url == url or page.url in url or url in page.url:
+                ordered.append(page)
+                remaining.remove(page)
+                break
+    return ordered or pages
+
 
 def _fetch_or_raise(url: object) -> FetchedPage:
     """fetch_page for foreach use: bad urls / failed fetches raise so the item is
@@ -126,6 +151,10 @@ def _make_publish(
         briefing = str(context.get("briefing", ""))
         pages = [p for p in context.get("pages") or [] if isinstance(p, FetchedPage)]
         failures = [str(f) for f in context.get("failures") or []]
+
+        # The briefing cites [n] in *note* order, and summarize may have skipped some
+        # pages — list sources in note order so citations line up.
+        pages = _cited_pages(pages, context.get("notes") or [])
 
         html_text = render_report(
             topic=topic,

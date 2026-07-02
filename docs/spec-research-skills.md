@@ -152,7 +152,7 @@ human/agent-curated; no auto-append.)
 | setting | default | purpose |
 |---|---|---|
 | `step_input_budget` | 4000 | max approx tokens of any assembled step prompt |
-| `step_max_tokens` | 1200 | output cap per step call (reasoning models need headroom) |
+| `step_max_tokens` | 3000 | output cap per step call (reasoning models need headroom) |
 | `research_sources` | 5 | pages fetched/summarized per run |
 | `masques_dir` | `masques/` | extra masque search path |
 | `masque` | — | optional masque donned by the chat agent |
