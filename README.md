@@ -19,7 +19,13 @@ chat interface) and run it on my own hardware.
   Nous Research's hermes-agent: `system_prompt_block` / `prefetch` / `sync_turn`).
   Default impl is SQLite FTS5 + a markdown notes file — OpenViking can be added later
   as a drop-in provider.
-- **OpenTelemetry gen_ai** spans/metrics via OpenInference instrumentation (optional).
+- **OpenTelemetry gen_ai** observability (optional, `LOON_OTEL=console|otlp`): every
+  model call emits official gen_ai-semconv spans (`chat {model}`, `gen_ai.usage.*`,
+  `gen_ai.provider.name`) and `gen_ai.client.token.usage`/`operation.duration` metrics
+  via `opentelemetry-instrumentation-openai-v2`; skill runs add `invoke_agent {skill}` /
+  `execute_tool {tool}` spans; OpenInference adds the LangChain/LangGraph callback tree.
+  Message content is only captured with
+  `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`.
 
 ## How it works
 

@@ -18,11 +18,16 @@ from dataclasses import dataclass, field
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 
 from ..textbudget import CHARS_PER_TOKEN, truncate_to_tokens
 from .model import Skill, Step
 
 logger = logging.getLogger(__name__)
+
+# No-op proxy until setup_telemetry installs a provider (LOON_OTEL=off costs nothing).
+_tracer = trace.get_tracer("loon_agent.skills")
 
 _THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
 _LINE_MARKER_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+)")
@@ -72,6 +77,27 @@ class SkillRunner:
         if missing:
             raise SkillRunError(f"skill {skill.name!r} missing args: {missing}")
 
+        # gen_ai agent semconv: one invoke_agent span per skill run, a child span per
+        # step; tool executions inside become execute_tool spans, and the model calls
+        # get chat spans from the instrumented openai SDK underneath.
+        with _tracer.start_as_current_span(
+            f"invoke_agent {skill.name}",
+            attributes={
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.agent.name": skill.name,
+                "gen_ai.agent.description": skill.description,
+            },
+        ) as run_span:
+            try:
+                result = self._run_steps(skill, args)
+            except Exception as exc:
+                run_span.set_status(Status(StatusCode.ERROR, str(exc)))
+                run_span.record_exception(exc)
+                raise
+            run_span.set_attribute("loon.skill.failures", len(result.failures))
+            return result
+
+    def _run_steps(self, skill: Skill, args: Mapping[str, object]) -> RunResult:
         context: dict[str, object] = dict(args)
         failures: list[str] = []
 
@@ -82,16 +108,31 @@ class SkillRunner:
                     f"step {step.name!r}: unknown tool {step.tool!r} "
                     f"(registered: {sorted(self.tools)})"
                 )
-            if step.foreach is not None:
-                items = context.get(step.foreach)
-                if not isinstance(items, list):
-                    raise SkillRunError(
-                        f"step {step.name!r}: foreach {step.foreach!r} is not a list "
-                        f"(got {type(items).__name__})"
+            attributes = {
+                "loon.skill.name": skill.name,
+                "loon.skill.step": step.name,
+                "loon.step.kind": step.kind,
+            }
+            if step.masque:
+                attributes["loon.step.masque"] = step.masque
+            with _tracer.start_as_current_span(f"step {step.name}", attributes=attributes) as span:
+                if step.foreach is not None:
+                    items = context.get(step.foreach)
+                    if not isinstance(items, list):
+                        raise SkillRunError(
+                            f"step {step.name!r}: foreach {step.foreach!r} is not a list "
+                            f"(got {type(items).__name__})"
+                        )
+                    before = len(failures)
+                    context[step.output] = self._run_foreach(
+                        skill, step, context, items, failures
                     )
-                context[step.output] = self._run_foreach(skill, step, context, items, failures)
-            else:
-                context[step.output] = self._run_single(skill, step, context, failures=failures)
+                    span.set_attribute("loon.step.items_total", len(items))
+                    span.set_attribute("loon.step.items_failed", len(failures) - before)
+                else:
+                    context[step.output] = self._run_single(
+                        skill, step, context, failures=failures
+                    )
             logger.info("skill %s: step %s done", skill.name, step.name)
 
         return RunResult(outputs=context, failures=failures)
@@ -138,9 +179,21 @@ class SkillRunner:
             # whole-pipeline tools receive the full context mapping (plus the skips
             # accumulated so far, so e.g. a publish step can report them).
             fn = self.tools[step.tool]
-            if step.foreach is not None:
-                return fn(item)
-            return fn({**context, "failures": list(failures or [])})
+            with _tracer.start_as_current_span(
+                f"execute_tool {step.tool}",
+                attributes={
+                    "gen_ai.operation.name": "execute_tool",
+                    "gen_ai.tool.name": str(step.tool),
+                    "gen_ai.tool.type": "function",
+                },
+            ) as span:
+                try:
+                    if step.foreach is not None:
+                        return fn(item)
+                    return fn({**context, "failures": list(failures or [])})
+                except Exception as exc:
+                    span.set_status(Status(StatusCode.ERROR, str(exc)))
+                    raise
 
         template = skill.templates[step.name]
         variables = dict(context)
