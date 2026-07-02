@@ -19,7 +19,7 @@ from ..graph import _text
 from ..session import MessageEvent, SessionSource, build_session_key
 from ..skills.engine import SkillRunError
 
-_BANNER = "loon-agent — type a message, /skill <name> <args>, or /exit to quit."
+_BANNER = "loon-agent — type a message, /skill <name> <args>, /new for a fresh session, /exit."
 _EXIT = {"/exit", "/quit", "exit", "quit"}
 
 
@@ -82,7 +82,8 @@ def run_cli() -> None:
     runtime = build_runtime(settings, progress=lambda message: print(f"  … {message}"))
     agent = runtime.agent
     source = SessionSource(platform="cli", chat_id="local", user_id=getpass.getuser())
-    session_key = build_session_key(source)
+    base_key = build_session_key(source)
+    session_key = runtime.epochs.thread_id(base_key)
 
     print(_BANNER)
     skills = ", ".join(sorted(runtime.skills)) or "none"
@@ -98,6 +99,10 @@ def run_cli() -> None:
             continue
         if line.lower() in _EXIT:
             break
+        if line == "/new":
+            session_key = runtime.epochs.bump(base_key)
+            print(f"fresh session started: {session_key}\n")
+            continue
 
         if command := parse_skill_command(line):
             _run_skill(runtime, *command)

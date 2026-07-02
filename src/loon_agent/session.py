@@ -10,7 +10,10 @@ message came from.
 from __future__ import annotations
 
 import hashlib
+import sqlite3
+import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -50,3 +53,42 @@ def build_session_key(source: SessionSource) -> str:
     )
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
     return f"{source.platform}:{digest}"
+
+
+class SessionEpochs:
+    """Persistent per-conversation epoch counters — the machinery behind ``/new``.
+
+    The base session key identifies *where* a conversation happens (this DM, this
+    topic); the epoch says *which* conversation is current there. Bumping the epoch
+    starts a fresh checkpointed thread while the old one stays intact in the
+    checkpointer (and long-term memory still spans all of them).
+    """
+
+    def __init__(self, db_path: Path | str) -> None:
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS session_epochs ("
+            "base_key TEXT PRIMARY KEY, epoch INTEGER NOT NULL)"
+        )
+        self._conn.commit()
+
+    def thread_id(self, base_key: str) -> str:
+        """The current thread id for a base session key (epoch 0 = the key itself)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT epoch FROM session_epochs WHERE base_key = ?", (base_key,)
+            ).fetchone()
+        epoch = row[0] if row else 0
+        return base_key if epoch == 0 else f"{base_key}:e{epoch}"
+
+    def bump(self, base_key: str) -> str:
+        """Start a fresh conversation for this base key; returns the new thread id."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO session_epochs (base_key, epoch) VALUES (?, 1) "
+                "ON CONFLICT(base_key) DO UPDATE SET epoch = epoch + 1",
+                (base_key,),
+            )
+            self._conn.commit()
+        return self.thread_id(base_key)

@@ -23,10 +23,10 @@ from telegram import Bot, Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from ..app import build_agent
+from ..app import build_runtime
 from ..config import get_settings
 from ..graph import LoonAgent
-from ..session import MessageEvent, SessionSource, build_session_key
+from ..session import MessageEvent, SessionEpochs, SessionSource, build_session_key
 
 logger = logging.getLogger(__name__)
 
@@ -78,12 +78,30 @@ async def _typing(bot: Bot, chat_id: int) -> AsyncIterator[None]:
             await task
 
 
+def _source_of(message: object, user: object, chat: object) -> SessionSource:
+    """Derive the platform-neutral session source for a Telegram message."""
+    topic_id = message.message_thread_id if message.is_topic_message else None
+    return SessionSource(
+        platform="telegram",
+        chat_id=str(chat.id),
+        user_id=str(user.id),
+        chat_type="thread" if topic_id is not None else normalize_chat_type(chat.type),
+        thread_id=str(topic_id) if topic_id is not None else None,
+    )
+
+
 class LoonTelegramBot:
     """Handlers binding a :class:`LoonAgent` to a Telegram bot."""
 
-    def __init__(self, agent: LoonAgent, allowlist: frozenset[int]) -> None:
+    def __init__(
+        self,
+        agent: LoonAgent,
+        allowlist: frozenset[int],
+        epochs: SessionEpochs | None = None,
+    ) -> None:
         self.agent = agent
         self.allowlist = allowlist
+        self.epochs = epochs
 
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message, user = update.effective_message, update.effective_user
@@ -99,6 +117,24 @@ class LoonTelegramBot:
                 "add it to LOON_TELEGRAM_ALLOWED_USERS to get access."
             )
 
+    async def on_new(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/new — start a fresh conversation for this chat (old thread stays on disk)."""
+        message, user, chat = update.effective_message, update.effective_user, update.effective_chat
+        if message is None or user is None or chat is None:
+            return
+        if user.id not in self.allowlist:
+            await message.reply_text(
+                f"Sorry, I only talk to my humans. (your telegram id: {user.id})"
+            )
+            return
+        if self.epochs is None:
+            await message.reply_text("Session management isn't enabled here.")
+            return
+        base_key = build_session_key(_source_of(message, user, chat))
+        thread = self.epochs.bump(base_key)
+        logger.info("fresh session started (thread=%s)", thread)
+        await message.reply_text("Fresh conversation started — earlier context is set aside.")
+
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message, user, chat = update.effective_message, update.effective_user, update.effective_chat
         if message is None or user is None or chat is None or not message.text:
@@ -109,15 +145,9 @@ class LoonTelegramBot:
             )
             return
 
-        topic_id = message.message_thread_id if message.is_topic_message else None
-        source = SessionSource(
-            platform="telegram",
-            chat_id=str(chat.id),
-            user_id=str(user.id),
-            chat_type="thread" if topic_id is not None else normalize_chat_type(chat.type),
-            thread_id=str(topic_id) if topic_id is not None else None,
-        )
-        session_key = build_session_key(source)
+        source = _source_of(message, user, chat)
+        base_key = build_session_key(source)
+        session_key = self.epochs.thread_id(base_key) if self.epochs else base_key
         event = MessageEvent(source=source, text=message.text)
 
         async with _typing(context.bot, chat.id):
@@ -152,11 +182,12 @@ def run_telegram() -> None:
             "DM the bot once and it will tell you your id."
         )
 
-    agent = build_agent(settings)
-    bot = LoonTelegramBot(agent, allowlist)
+    runtime = build_runtime(settings)
+    bot = LoonTelegramBot(runtime.agent, allowlist, epochs=runtime.epochs)
 
     application = Application.builder().token(settings.telegram_token).build()
     application.add_handler(CommandHandler("start", bot.on_start))
+    application.add_handler(CommandHandler("new", bot.on_new))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.on_message))
 
     print(f"loon telegram bot up — backend={settings.backend}, allowed users={len(allowlist)}")

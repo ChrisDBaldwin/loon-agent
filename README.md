@@ -74,6 +74,10 @@ Or run it as a Telegram bot (long-polling; no public ingress needed):
 uv run python -m loon_agent telegram
 ```
 
+Send `/new` (Telegram or CLI) to start a fresh conversation: the checkpointed history
+never compacts, so long-running chats grow the prompt every turn — `/new` rotates to a
+fresh thread while the old one stays on disk and long-term memory keeps working.
+
 Smoke-test a backend directly:
 
 ```bash

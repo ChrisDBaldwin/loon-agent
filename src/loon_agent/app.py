@@ -22,6 +22,7 @@ from .masques import MasqueLoader
 from .memory import SqliteMemoryProvider
 from .memory.provider import MemoryProvider
 from .report import render_report, write_report
+from .session import SessionEpochs
 from .skills import Skill, discover_skills
 from .skills.engine import SkillRunner
 from .telemetry import setup_telemetry
@@ -39,6 +40,7 @@ class LoonRuntime:
     skills: dict[str, Skill]
     runner: SkillRunner
     settings: Settings
+    epochs: SessionEpochs
 
 
 def build_runtime(
@@ -96,6 +98,7 @@ def build_runtime(
         skills=discover_skills(settings.skills_dir),
         runner=runner,
         settings=settings,
+        epochs=SessionEpochs(data_dir / "sessions.sqlite"),
     )
 
 
