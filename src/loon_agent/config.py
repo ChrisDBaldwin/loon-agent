@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     # off | console | otlp
     otel: str = "off"
 
+    # Skills + masques (see docs/spec-research-skills.md).
+    skills_dir: Path = Path("skills")
+    masques_dir: Path | None = None  # extra masque catalog (e.g. ~/git/masques/personas)
+    masque: str | None = None  # optional lens donned by the chat agent itself
+    step_input_budget: int = 4000  # approx tokens per assembled skill-step prompt
+    step_max_tokens: int = 1200  # output cap per step call (reasoning needs headroom)
+    research_sources: int = 5  # pages fetched/summarized per research run
+
     # Telegram adapter (see adapters/telegram.py).
     telegram_token: str | None = None
     # Comma-separated numeric Telegram user ids. Empty -> deny everyone (safe default);

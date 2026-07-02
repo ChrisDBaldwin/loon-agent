@@ -2,40 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import pytest
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
 
+from fakes import FakeChat
 from loon_agent.skills import parse_skill
 from loon_agent.skills.engine import RunResult, SkillRunError, SkillRunner, _parse_lines
 from loon_agent.textbudget import CHARS_PER_TOKEN
-
-
-class FakeChat(BaseChatModel):
-    """Replays scripted string replies and records every prompt it was sent."""
-
-    replies: list[str]
-    calls: list[list[BaseMessage]] = []
-    i: int = 0
-
-    @property
-    def _llm_type(self) -> str:
-        return "fake-chat"
-
-    def _generate(
-        self,
-        messages: Sequence[BaseMessage],
-        stop: list[str] | None = None,
-        run_manager=None,  # noqa: ANN001
-        **kwargs,
-    ) -> ChatResult:
-        self.calls.append(list(messages))
-        reply = self.replies[min(self.i, len(self.replies) - 1)]
-        self.i += 1
-        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=reply))])
 
 
 def _fake(replies: list[str]) -> FakeChat:
