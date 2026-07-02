@@ -123,6 +123,46 @@ On memory-tight machines, keep the loaded model resident (free RAM, modest conte
 model whose weights get paged out between requests will cold-start slowly. Reasoning
 models work but spend heavily on think tokens; see the limitations section.
 
+## Running as a service
+
+For an always-on bot, run the Telegram adapter under your init system. macOS launchd
+example — save as `~/Library/LaunchAgents/com.loon-agent.telegram.plist`, then
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.loon-agent.telegram.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>            <string>com.loon-agent.telegram</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string><string>python</string>
+        <string>-m</string><string>loon_agent</string><string>telegram</string>
+    </array>
+    <key>WorkingDirectory</key> <string>/path/to/loon-agent</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>             <string>/opt/homebrew/bin:/usr/bin:/bin</string>
+        <key>PYTHONUNBUFFERED</key> <string>1</string>
+    </dict>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>ThrottleInterval</key><integer>10</integer>
+    <key>StandardOutPath</key>  <string>/tmp/loon-agent.log</string>
+    <key>StandardErrorPath</key><string>/tmp/loon-agent.log</string>
+</dict>
+</plist>
+```
+
+Notes: `WorkingDirectory` must be the repo checkout (`.env`, `skills/`, `masques/` and
+`.loon/` resolve relative to it). After pulling new code, restart with
+`launchctl kickstart -k gui/$(id -u)/com.loon-agent.telegram`. Only one process may
+long-poll a bot token at a time — stop any manual `python -m loon_agent telegram`
+before starting the service. On Linux, an equivalent systemd unit with
+`Restart=always` and `WorkingDirectory=` does the same job.
+
 ## Skills, masques & deep research
 
 Beyond chat, loon runs **skills**: markdown-authored pipelines executed by a

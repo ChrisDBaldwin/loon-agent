@@ -129,9 +129,16 @@ class LoonTelegramBot:
 
         for chunk in chunk_message(reply) or ["(no reply)"]:
             await message.reply_text(chunk)
+        logger.info("turn done (session=%s, reply=%d chars)", session_key, len(reply))
 
 
 def run_telegram() -> None:
+    # Service-friendly logging: loon at INFO, libraries at WARNING (httpx would
+    # otherwise log every getUpdates poll).
+    logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger().setLevel(logging.WARNING)
+    logging.getLogger("loon_agent").setLevel(logging.INFO)
+
     settings = get_settings()
     if not settings.telegram_token:
         raise SystemExit(
