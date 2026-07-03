@@ -44,6 +44,31 @@ class LoonRuntime:
     runner: SkillRunner
     settings: Settings
     epochs: SessionEpochs
+    # Which (backend, model) the agent is currently talking to (mutated by /model).
+    active_backend: str = ""
+    active_model: str = ""
+    # Rebuild dependencies kept so /model can swap the LLM without losing state.
+    _checkpointer: object = None
+    _memory: MemoryProvider | None = None
+    _persona: str | None = None
+
+    def switch_model(self, backend_name: str, model_id: str) -> None:
+        """Point the chat agent and skill runner at a different backend/model.
+
+        Runtime-only: conversation state (checkpointer), memory, and persona carry
+        over untouched; ``.env`` is not modified, so a restart reverts to it.
+        """
+        llm = make_llm(backend_name, settings=self.settings, model=model_id)
+        self.agent = LoonAgent(
+            llm,
+            DEFAULT_TOOLS,
+            checkpointer=self._checkpointer,
+            memory=self._memory,
+            persona=self._persona,
+        )
+        self.runner.llm = llm
+        self.active_backend = backend_name
+        self.active_model = model_id
 
 
 def build_runtime(
@@ -118,6 +143,11 @@ def build_runtime(
         runner=runner,
         settings=settings,
         epochs=SessionEpochs(data_dir / "sessions.sqlite"),
+        active_backend=settings.backend,
+        active_model=backend.model,
+        _checkpointer=checkpointer,
+        _memory=memory,
+        _persona=persona,
     )
 
 

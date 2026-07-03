@@ -14,12 +14,19 @@ import getpass
 from langchain_core.messages import AIMessage, ToolMessage
 
 from ..app import LoonRuntime, build_runtime
+from ..commands import (
+    HELP_TEXT,
+    format_model_list,
+    model_inventory,
+    pick_model,
+    status_text,
+)
 from ..config import get_settings
 from ..graph import _text
 from ..session import MessageEvent, SessionSource, build_session_key
 from ..skills.engine import SkillRunError
 
-_BANNER = "loon-agent — type a message, /skill <name> <args>, /new for a fresh session, /exit."
+_BANNER = "loon-agent — type a message, /help for commands, /exit to quit."
 _EXIT = {"/exit", "/quit", "exit", "quit"}
 
 
@@ -77,13 +84,21 @@ def _run_skill(runtime: LoonRuntime, name: str, args_text: str) -> None:
         print(f"  (skipped: {note})")
 
 
+def _inventory(runtime: LoonRuntime):
+    return model_inventory(
+        runtime.settings,
+        active_backend=runtime.active_backend,
+        active_model=runtime.active_model,
+    )
+
+
 def run_cli() -> None:
     settings = get_settings()
     runtime = build_runtime(settings, progress=lambda message: print(f"  … {message}"))
-    agent = runtime.agent
     source = SessionSource(platform="cli", chat_id="local", user_id=getpass.getuser())
     base_key = build_session_key(source)
     session_key = runtime.epochs.thread_id(base_key)
+    last_text = ""
 
     print(_BANNER)
     skills = ", ".join(sorted(runtime.skills)) or "none"
@@ -103,13 +118,38 @@ def run_cli() -> None:
             session_key = runtime.epochs.bump(base_key)
             print(f"fresh session started: {session_key}\n")
             continue
+        if line == "/help":
+            print(HELP_TEXT + "\n")
+            continue
+        if line == "/status":
+            print(status_text(runtime, session_key) + "\n")
+            continue
+        if line == "/models" or line == "/model":
+            choices, notes = _inventory(runtime)
+            print(format_model_list(choices, notes) + "\n")
+            continue
+        if line.startswith("/model "):
+            choices, _ = _inventory(runtime)
+            picked = pick_model(choices, line.split(maxsplit=1)[1].strip())
+            if isinstance(picked, str):
+                print(picked + "\n")
+            else:
+                runtime.switch_model(picked.backend, picked.model)
+                print(f"now using {picked.model} [{picked.backend}] (reverts on restart)\n")
+            continue
+        if line == "/retry":
+            if not last_text:
+                print("nothing to retry yet — send a message first.\n")
+                continue
+            line = last_text
 
         if command := parse_skill_command(line):
             _run_skill(runtime, *command)
             continue
 
+        last_text = line
         event = MessageEvent(source=source, text=line)
-        for message in agent.stream(event.text, session_key):
+        for message in runtime.agent.stream(event.text, session_key):
             _render(message)
 
     print("bye.")

@@ -54,7 +54,9 @@ def _update(user_id: int = 99, text: str = "hi") -> SimpleNamespace:
 def test_new_command_rotates_the_thread_used_by_messages(tmp_path) -> None:
     seen: list[str] = []
     agent = SimpleNamespace(invoke=lambda text, session_key: seen.append(session_key) or "ok")
-    bot = LoonTelegramBot(agent, allowlist=frozenset({99}), epochs=_store(tmp_path))
+    bot = LoonTelegramBot(
+        SimpleNamespace(agent=agent, epochs=_store(tmp_path)), allowlist=frozenset({99})
+    )
     context = SimpleNamespace(bot=AsyncMock())
 
     asyncio.run(bot.on_message(_update(), context))
@@ -68,7 +70,7 @@ def test_new_command_rotates_the_thread_used_by_messages(tmp_path) -> None:
 
 def test_new_command_refuses_strangers(tmp_path) -> None:
     epochs = _store(tmp_path)
-    bot = LoonTelegramBot(agent=None, allowlist=frozenset({1}), epochs=epochs)
+    bot = LoonTelegramBot(SimpleNamespace(agent=None, epochs=epochs), allowlist=frozenset({1}))
     update = _update(user_id=99, text="/new")
 
     asyncio.run(bot.on_new(update, context=None))

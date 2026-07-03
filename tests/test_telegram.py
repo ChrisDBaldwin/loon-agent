@@ -70,6 +70,14 @@ def test_telegram_allowlist_rejects_garbage() -> None:
 # --- handler flows ---------------------------------------------------------------
 
 
+def _runtime(agent: object = None) -> SimpleNamespace:
+    """Minimal LoonRuntime stand-in: pass-through epochs, no model registry."""
+    return SimpleNamespace(
+        agent=agent,
+        epochs=SimpleNamespace(thread_id=lambda key: key, bump=lambda key: f"{key}:e1"),
+    )
+
+
 def _update(text: str = "hi", user_id: int = 99, chat_type: str = "private") -> SimpleNamespace:
     message = SimpleNamespace(
         text=text,
@@ -85,7 +93,7 @@ def _update(text: str = "hi", user_id: int = 99, chat_type: str = "private") -> 
 
 
 def test_unknown_user_is_refused_with_their_id() -> None:
-    bot = LoonTelegramBot(agent=None, allowlist=frozenset({1}))
+    bot = LoonTelegramBot(_runtime(), allowlist=frozenset({1}))
     update = _update(user_id=99)
 
     asyncio.run(bot.on_message(update, context=None))
@@ -97,7 +105,7 @@ def test_unknown_user_is_refused_with_their_id() -> None:
 
 def test_authorized_user_gets_agent_reply() -> None:
     agent = SimpleNamespace(invoke=lambda text, session_key: f"echo: {text}")
-    bot = LoonTelegramBot(agent=agent, allowlist=frozenset({99}))
+    bot = LoonTelegramBot(_runtime(agent), allowlist=frozenset({99}))
     update = _update(text="ping", user_id=99)
     context = SimpleNamespace(bot=AsyncMock())
 
@@ -111,7 +119,7 @@ def test_agent_failure_becomes_apology_not_crash() -> None:
     def boom(text: str, session_key: str) -> str:
         raise RuntimeError("backend down")
 
-    bot = LoonTelegramBot(agent=SimpleNamespace(invoke=boom), allowlist=frozenset({99}))
+    bot = LoonTelegramBot(_runtime(SimpleNamespace(invoke=boom)), allowlist=frozenset({99}))
     update = _update(user_id=99)
     context = SimpleNamespace(bot=AsyncMock())
 
@@ -124,7 +132,7 @@ def test_agent_failure_becomes_apology_not_crash() -> None:
 def test_session_key_distinguishes_dm_from_topic() -> None:
     seen: list[str] = []
     agent = SimpleNamespace(invoke=lambda text, session_key: seen.append(session_key) or "ok")
-    bot = LoonTelegramBot(agent=agent, allowlist=frozenset({99}))
+    bot = LoonTelegramBot(_runtime(agent), allowlist=frozenset({99}))
 
     for is_topic, thread_id in [(False, None), (True, 7)]:
         update = _update(user_id=99)
@@ -139,7 +147,7 @@ def test_session_key_distinguishes_dm_from_topic() -> None:
 
 
 def test_start_command_tells_stranger_their_id() -> None:
-    bot = LoonTelegramBot(agent=None, allowlist=frozenset())
+    bot = LoonTelegramBot(_runtime(), allowlist=frozenset())
     update = _update(user_id=4242)
 
     asyncio.run(bot.on_start(update, context=None))

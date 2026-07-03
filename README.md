@@ -74,9 +74,16 @@ Or run it as a Telegram bot (long-polling; no public ingress needed):
 uv run python -m loon_agent telegram
 ```
 
-Send `/new` (Telegram or CLI) to start a fresh conversation: the checkpointed history
-never compacts, so long-running chats grow the prompt every turn — `/new` rotates to a
-fresh thread while the old one stays on disk and long-term memory keeps working.
+Both adapters speak the same slash commands (Telegram also shows them in its "/" menu):
+
+| command      | what it does |
+|--------------|--------------|
+| `/new`       | fresh conversation — history never compacts, so long chats grow the prompt every turn; `/new` rotates to a clean thread (old one stays on disk, long-term memory still spans them) |
+| `/retry`     | send your previous message again — a fresh roll when a local reasoning model fumbles a turn |
+| `/models`    | live numbered inventory: every chat model each configured backend's `/v1/models` reports (embedding models filtered out; dead backends noted) |
+| `/model <n>` | switch to model #n from the list — runtime-only, conversation/memory carry over, restart reverts to `.env` |
+| `/status`    | active backend + model, server reachability/latency, session thread + message count, memory backend, uptime |
+| `/help`      | list the commands |
 
 Smoke-test a backend directly:
 

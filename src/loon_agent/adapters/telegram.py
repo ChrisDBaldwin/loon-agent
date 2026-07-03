@@ -19,14 +19,20 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator
 
-from telegram import Bot, Update
+from telegram import Bot, BotCommand, Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from ..app import build_runtime
+from ..app import LoonRuntime, build_runtime
+from ..commands import (
+    HELP_TEXT,
+    format_model_list,
+    model_inventory,
+    pick_model,
+    status_text,
+)
 from ..config import get_settings
-from ..graph import LoonAgent
-from ..session import MessageEvent, SessionEpochs, SessionSource, build_session_key
+from ..session import MessageEvent, SessionSource, build_session_key
 
 logger = logging.getLogger(__name__)
 
@@ -91,17 +97,27 @@ def _source_of(message: object, user: object, chat: object) -> SessionSource:
 
 
 class LoonTelegramBot:
-    """Handlers binding a :class:`LoonAgent` to a Telegram bot."""
+    """Handlers binding a :class:`LoonRuntime` to a Telegram bot."""
 
-    def __init__(
-        self,
-        agent: LoonAgent,
-        allowlist: frozenset[int],
-        epochs: SessionEpochs | None = None,
-    ) -> None:
-        self.agent = agent
+    def __init__(self, runtime: LoonRuntime, allowlist: frozenset[int]) -> None:
+        self.runtime = runtime
         self.allowlist = allowlist
-        self.epochs = epochs
+        self._last_text: dict[str, str] = {}  # base session key -> last user message
+
+    async def _gate(self, update: Update):
+        """Common preamble: unpack the update and enforce the allowlist.
+
+        Returns (message, user, chat) or None if the update is unusable/refused.
+        """
+        message, user, chat = update.effective_message, update.effective_user, update.effective_chat
+        if message is None or user is None or chat is None:
+            return None
+        if user.id not in self.allowlist:
+            await message.reply_text(
+                f"Sorry, I only talk to my humans. (your telegram id: {user.id})"
+            )
+            return None
+        return message, user, chat
 
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message, user = update.effective_message, update.effective_user
@@ -109,7 +125,8 @@ class LoonTelegramBot:
             return
         if user.id in self.allowlist:
             await message.reply_text(
-                "loon here — send me a message and I'll think on my own hardware."
+                "loon here — send me a message and I'll think on my own hardware. "
+                "/help lists commands."
             )
         else:
             await message.reply_text(
@@ -117,42 +134,104 @@ class LoonTelegramBot:
                 "add it to LOON_TELEGRAM_ALLOWED_USERS to get access."
             )
 
+    async def on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if gated := await self._gate(update):
+            await gated[0].reply_text(HELP_TEXT)
+
+    async def on_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not (gated := await self._gate(update)):
+            return
+        message, user, chat = gated
+        session_key = self._session_key(message, user, chat)
+        text = await asyncio.to_thread(status_text, self.runtime, session_key)
+        await message.reply_text(text)
+
+    async def on_models(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not (gated := await self._gate(update)):
+            return
+        message = gated[0]
+        choices, notes = await asyncio.to_thread(self._inventory)
+        await message.reply_text(format_model_list(choices, notes))
+
+    async def on_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not (gated := await self._gate(update)):
+            return
+        message = gated[0]
+        args = context.args if context is not None and context.args else []
+        if not args:
+            await self.on_models(update, context)
+            return
+        choices, _ = await asyncio.to_thread(self._inventory)
+        picked = pick_model(choices, args[0])
+        if isinstance(picked, str):
+            await message.reply_text(picked)
+            return
+        try:
+            await asyncio.to_thread(self.runtime.switch_model, picked.backend, picked.model)
+        except Exception as exc:
+            logger.exception("model switch failed")
+            await message.reply_text(f"Switch failed: {exc}")
+            return
+        logger.info("switched model to %s [%s]", picked.model, picked.backend)
+        await message.reply_text(
+            f"Now using {picked.model} [{picked.backend}]. Reverts to .env on restart."
+        )
+
     async def on_new(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """/new — start a fresh conversation for this chat (old thread stays on disk)."""
-        message, user, chat = update.effective_message, update.effective_user, update.effective_chat
-        if message is None or user is None or chat is None:
+        if not (gated := await self._gate(update)):
             return
-        if user.id not in self.allowlist:
-            await message.reply_text(
-                f"Sorry, I only talk to my humans. (your telegram id: {user.id})"
-            )
-            return
-        if self.epochs is None:
-            await message.reply_text("Session management isn't enabled here.")
-            return
+        message, user, chat = gated
         base_key = build_session_key(_source_of(message, user, chat))
-        thread = self.epochs.bump(base_key)
+        thread = self.runtime.epochs.bump(base_key)
         logger.info("fresh session started (thread=%s)", thread)
         await message.reply_text("Fresh conversation started — earlier context is set aside.")
 
-    async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        message, user, chat = update.effective_message, update.effective_user, update.effective_chat
-        if message is None or user is None or chat is None or not message.text:
+    async def on_retry(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/retry — send the previous message again (fresh roll on a flaky local model)."""
+        if not (gated := await self._gate(update)):
             return
-        if user.id not in self.allowlist:
-            await message.reply_text(
-                f"Sorry, I only talk to my humans. (your telegram id: {user.id})"
-            )
+        message, user, chat = gated
+        base_key = build_session_key(_source_of(message, user, chat))
+        last = self._last_text.get(base_key)
+        if not last:
+            await message.reply_text("Nothing to retry yet — send a message first.")
             return
+        await self._run_turn(message, user, chat, context, last)
 
+    async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not (gated := await self._gate(update)):
+            return
+        message, user, chat = gated
+        if not message.text:
+            return
+        base_key = build_session_key(_source_of(message, user, chat))
+        self._last_text[base_key] = message.text
+        await self._run_turn(message, user, chat, context, message.text)
+
+    # --- shared plumbing ---------------------------------------------------------
+
+    def _session_key(self, message: object, user: object, chat: object) -> str:
+        base_key = build_session_key(_source_of(message, user, chat))
+        return self.runtime.epochs.thread_id(base_key)
+
+    def _inventory(self):
+        return model_inventory(
+            self.runtime.settings,
+            active_backend=self.runtime.active_backend,
+            active_model=self.runtime.active_model,
+        )
+
+    async def _run_turn(self, message, user, chat, context, text: str) -> None:
+        session_key = self._session_key(message, user, chat)
         source = _source_of(message, user, chat)
-        base_key = build_session_key(source)
-        session_key = self.epochs.thread_id(base_key) if self.epochs else base_key
-        event = MessageEvent(source=source, text=message.text)
+        event = MessageEvent(source=source, text=text)
 
         async with _typing(context.bot, chat.id):
             try:
-                reply = await asyncio.to_thread(self.agent.invoke, event.text, session_key)
+                reply = await asyncio.to_thread(
+                    self.runtime.agent.invoke, event.text, session_key
+                )
             except Exception:
                 logger.exception("turn failed (session=%s)", session_key)
                 reply = _ERROR_REPLY
@@ -183,11 +262,31 @@ def run_telegram() -> None:
         )
 
     runtime = build_runtime(settings)
-    bot = LoonTelegramBot(runtime.agent, allowlist, epochs=runtime.epochs)
+    bot = LoonTelegramBot(runtime, allowlist)
 
-    application = Application.builder().token(settings.telegram_token).build()
+    async def _post_init(app: Application) -> None:
+        # Populate Telegram's command menu (the "/" button in the UI).
+        await app.bot.set_my_commands(
+            [
+                BotCommand("new", "start a fresh conversation"),
+                BotCommand("retry", "send your previous message again"),
+                BotCommand("models", "list models available to switch to"),
+                BotCommand("model", "switch model: /model <n>"),
+                BotCommand("status", "backend, server health, session info"),
+                BotCommand("help", "list commands"),
+            ]
+        )
+
+    application = (
+        Application.builder().token(settings.telegram_token).post_init(_post_init).build()
+    )
     application.add_handler(CommandHandler("start", bot.on_start))
+    application.add_handler(CommandHandler("help", bot.on_help))
+    application.add_handler(CommandHandler("status", bot.on_status))
+    application.add_handler(CommandHandler("models", bot.on_models))
+    application.add_handler(CommandHandler("model", bot.on_model))
     application.add_handler(CommandHandler("new", bot.on_new))
+    application.add_handler(CommandHandler("retry", bot.on_retry))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.on_message))
 
     print(f"loon telegram bot up — backend={settings.backend}, allowed users={len(allowlist)}")
