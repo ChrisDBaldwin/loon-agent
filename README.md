@@ -85,6 +85,16 @@ Both adapters speak the same slash commands (Telegram also shows them in its "/"
 | `/status`    | active backend + model, server reachability/latency, session thread + message count, memory backend, uptime |
 | `/help`      | list the commands |
 
+Send `/don <masque> [intent]` to have the agent *become* a persona — one operation
+swaps the system prompt, tool access, memory scope, and credentials together, and
+`/doff` restores baseline. Identities come from `masques/` (or a
+[masques](https://github.com/ChrisDBaldwin/masques) catalog); an optional
+`<name>.persona.yaml` sidecar binds capabilities, enforced structurally: tools
+outside its allow-list are never handed to the model, so they don't exist in its
+tool schema (the `bind` tier). The active persona is mirrored to
+`data/masque.session.yaml` — never any secret material — and stamped onto OTEL
+spans as `persona.*` attributes.
+
 Smoke-test a backend directly:
 
 ```bash
@@ -173,6 +183,24 @@ Notes: `WorkingDirectory` must be the repo checkout (`.env`, `skills/`, `masques
 long-poll a bot token at a time — stop any manual `python -m loon_agent telegram`
 before starting the service. On Linux, an equivalent systemd unit with
 `Restart=always` and `WorkingDirectory=` does the same job.
+
+### Internal website
+
+`python -m loon_agent web` serves the HTML loon publishes (research reports, `/publish`
+pages) over the LAN, so any node can browse it the way Grafana sits at `ironwood:3000`.
+It binds `LOON_WEB_HOST:LOON_WEB_PORT` (default `0.0.0.0:8800`) and serves `LOON_WEB_ROOT`
+(default `.loon/site`), with a generated gallery at `/`. It's static and read-only —
+decoupled from the model — so it's safe to run alongside the bot as a second service.
+
+Run it as its own LaunchAgent (`com.loon-agent.web`), identical to the plist above but with
+`web` as the last `ProgramArguments` string, its own `Label`, and a separate log path
+(e.g. `~/Library/Logs/loon-agent-web.log`). A ready-to-edit copy lives at
+`deploy/com.loon-agent.web.plist`. Then reach it at `http://<host>.local:8800`
+(e.g. `http://pontoon.local:8800`).
+
+First launch: macOS may prompt once to allow the Python process to accept incoming
+connections (it binds `0.0.0.0`) — allow it, or the site is only reachable from localhost.
+See `docs/web-site.md` for details.
 
 ## Skills, masques & deep research
 

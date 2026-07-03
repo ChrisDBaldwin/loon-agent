@@ -21,14 +21,23 @@ newest gen_ai attribute set is used. Prompt/completion content is NOT captured u
 Gated by ``LOON_OTEL``:
 * ``off`` (default) — no-op, zero overhead (engine spans become no-op proxies).
 * ``console`` — pretty-print spans (and metrics each 60s) to stdout.
-* ``otlp`` — export over OTLP to a collector (``OTEL_EXPORTER_OTLP_ENDPOINT``).
+* ``otlp`` — export traces, metrics, **and logs** over OTLP to a collector
+  (``OTEL_EXPORTER_OTLP_ENDPOINT``). Python ``logging`` records (loon's ``INFO`` turn/skill
+  logs, library ``WARNING``s) are bridged to OTLP log records via a root ``LoggingHandler``,
+  so the same collector that stores traces also stores loon's logs.
 """
 
 from __future__ import annotations
 
+import logging
 import os
+from collections.abc import Mapping
 
 from opentelemetry import metrics, trace
+from opentelemetry._logs import set_logger_provider
+from opentelemetry.context import Context
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor, LogExporter
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
     ConsoleMetricExporter,
@@ -36,7 +45,7 @@ from opentelemetry.sdk.metrics.export import (
     PeriodicExportingMetricReader,
 )
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import Span, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
@@ -47,9 +56,58 @@ from .config import Settings
 
 _configured = False
 
+# The donned persona's attribution trio (persona.id / persona.version /
+# persona.identity_hash — Phase 3 §6). Empty at baseline: no masque, no attributes.
+_persona_attributes: dict[str, str] = {}
+
+
+def set_persona_attributes(attributes: Mapping[str, str] | None) -> None:
+    """Stamp (or, with None, clear) the active persona's OTEL attribution.
+
+    Called by the runtime at don/doff. Safe to call with telemetry off — the
+    dict just never reaches a span processor.
+    """
+    _persona_attributes.clear()
+    if attributes:
+        _persona_attributes.update(attributes)
+
+
+class PersonaSpanProcessor(SpanProcessor):
+    """Stamps persona.* onto every span started while a masque is donned.
+
+    Attribution is event-carried on the host's existing pipeline (Phase 3 §6):
+    masques provides the three attributes, loon provides the spans.
+    """
+
+    def on_start(self, span: Span, parent_context: Context | None = None) -> None:
+        for key, value in _persona_attributes.items():
+            span.set_attribute(key, value)
+
+
+def build_log_handler(
+    resource: Resource, exporter: LogExporter
+) -> tuple[LoggerProvider, LoggingHandler]:
+    """Build a (provider, handler) pair that ships log records to ``exporter``.
+
+    The handler is bound to its own provider (explicit, not the process global) so this is
+    unit-testable without touching global state — the same pattern the exec-audit tests use
+    to dodge the once-per-process provider landmine.
+    """
+    provider = LoggerProvider(resource=resource)
+    provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
+    handler = LoggingHandler(level=logging.INFO, logger_provider=provider)
+    return provider, handler
+
+
+def _install_log_export(resource: Resource, exporter: LogExporter) -> None:
+    """Wire the OTLP log handler onto the root logger + set the global logger provider."""
+    provider, handler = build_log_handler(resource, exporter)
+    set_logger_provider(provider)  # global, for any direct OTLP log emitters
+    logging.getLogger().addHandler(handler)
+
 
 def setup_telemetry(settings: Settings) -> None:
-    """Configure tracing + metrics + instrumentation once, per ``settings.otel``."""
+    """Configure tracing + metrics + logs + instrumentation once, per ``settings.otel``."""
     global _configured
     mode = (settings.otel or "off").lower()
     if _configured or mode == "off":
@@ -62,6 +120,7 @@ def setup_telemetry(settings: Settings) -> None:
 
     resource = Resource.create({SERVICE_NAME: "loon-agent"})
     tracer_provider = TracerProvider(resource=resource)
+    tracer_provider.add_span_processor(PersonaSpanProcessor())
 
     metric_reader: MetricReader
     if mode == "console":
@@ -79,14 +138,19 @@ def setup_telemetry(settings: Settings) -> None:
             protocol = "http/protobuf" if ":4318" in endpoint else "grpc"
 
         if protocol == "grpc":
+            from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
             from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
         else:
+            from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
             from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
         tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
         metric_reader = PeriodicExportingMetricReader(OTLPMetricExporter())
+        # Bridge Python logging -> OTLP logs so the collector's logs pipeline gets loon's
+        # logs alongside its traces/metrics (same OTEL_EXPORTER_OTLP_ENDPOINT).
+        _install_log_export(resource, OTLPLogExporter())
 
     meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
 

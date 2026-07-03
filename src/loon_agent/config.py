@@ -90,6 +90,13 @@ class Settings(BaseSettings):
     # Comma-separated program names loon may run in the sandbox. Empty -> deny all (safe default).
     exec_allowed_bins: str = ""
 
+    # Internal website (see adapters/web.py): serves the HTML loon publishes over the LAN.
+    # host 0.0.0.0 makes it reachable network-wide (e.g. http://pontoon.local:8800), not just
+    # localhost. web_root is a curated publish dir — NOT all of data_dir (which holds DBs).
+    web_host: str = "0.0.0.0"
+    web_port: int = 8800
+    web_root: Path = Path(".loon/site")
+
     def exec_allowlist(self) -> frozenset[str]:
         """Program names the sandbox may run (basename-matched; empty = deny all)."""
         return frozenset(part.strip() for part in self.exec_allowed_bins.split(",") if part.strip())

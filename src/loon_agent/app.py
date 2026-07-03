@@ -3,36 +3,100 @@
 Kept separate from any single adapter so the CLI and Telegram build the same runtime
 the same way. ``build_agent`` remains the light entry point for chat-only adapters;
 ``build_runtime`` adds the skill engine (discovered skills, tool registry, masques).
+
+The runtime is also the masques reference host (Phase 3): ``don()`` swaps system
+prompt, tool access, memory scope and credentials together by rebuilding the
+compiled graph — the ``bind`` tier, where a denied tool is structurally absent
+from the model's schema rather than advised away.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.tools import BaseTool
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
+from masques_core import (
+    HOST_NATIVE_SERVER,
+    HostSnapshot,
+    Persona,
+    build_capability_plan,
+    compose,
+)
 
 from .config import Settings, get_settings
+from .credentials import CredentialResolver
 from .exec.backend import ExecBackend
 from .exec.docker_backend import DockerExecBackend, DockerLimits
 from .graph import LoonAgent
 from .llm import make_llm
 from .masques import MasqueLoader
-from .memory import ChromaMemoryProvider, SqliteMemoryProvider
+from .memory import ChromaMemoryProvider, ScopedMemory, SqliteMemoryProvider
 from .memory.provider import MemoryProvider
+from .mirror import active_record, utc_now, write_mirror
 from .report import render_report, write_report
 from .session import SessionEpochs
 from .skills import Skill, discover_skills
 from .skills.engine import SkillRunner
-from .telemetry import setup_telemetry
+from .telemetry import set_persona_attributes, setup_telemetry
 from .tools import DEFAULT_TOOLS
 from .tools.exec import delete_file, edit_file, run_command, write_file
+from .tools.publish import publish_page
 from .tools.web import FetchedPage, fetch_page, web_search
 
+logger = logging.getLogger(__name__)
+
 _MEMORY_TLDR_CHARS = 400
+
+
+def parse_don_command(line: str) -> tuple[str, str | None] | None:
+    """``/don name intent…`` -> (name, intent or None); bare ``/don`` -> ("", None)."""
+    line = line.strip()
+    if line != "/don" and not line.startswith("/don "):
+        return None
+    rest = line[len("/don") :].strip()
+    if not rest:
+        return ("", None)
+    name, _, intent = rest.partition(" ")
+    return (name, intent.strip() or None)
+
+
+def bound_tools(all_tools: list[BaseTool], persona: Persona) -> list[BaseTool]:
+    """The bind tier: the subset of native tools the persona's ``host`` binding allows.
+
+    A tool outside the allow/deny is never passed to ``bind_tools``/``ToolNode``,
+    so it does not exist in the model's tool schema. No sidecar or no ``host``
+    binding means the full registry (a lens-only masque changes no capabilities).
+    """
+    binding = None
+    if persona.config is not None:
+        binding = next(
+            (b for b in persona.config.mcp if b.server == HOST_NATIVE_SERVER), None
+        )
+    if binding is None:
+        return list(all_tools)
+    if not binding.enabled:
+        return []
+    tools = list(all_tools)
+    if binding.allow is not None:
+        tools = [t for t in tools if t.name in binding.allow]
+    if binding.deny:
+        tools = [t for t in tools if t.name not in binding.deny]
+    return tools
+
+
+# What loon offers a capability plan: its native tool registry, at the strongest
+# tier, with a scoped memory seam (Phase 3 §4-§5).
+HOST_SNAPSHOT = HostSnapshot(
+    servers=frozenset({HOST_NATIVE_SERVER}), achievable_tier="bind", memory_seam=True
+)
 
 
 @dataclass
@@ -47,28 +111,98 @@ class LoonRuntime:
     # Which (backend, model) the agent is currently talking to (mutated by /model).
     active_backend: str = ""
     active_model: str = ""
-    # Rebuild dependencies kept so /model can swap the LLM without losing state.
-    _checkpointer: object = None
-    _memory: MemoryProvider | None = None
-    _persona: str | None = None
+    # Don/doff machinery: the parts a graph rebuild needs again.
+    llm: BaseChatModel | None = None
+    checkpointer: BaseCheckpointSaver | None = None
+    base_memory: MemoryProvider | None = None
+    masques: MasqueLoader | None = None
+    baseline_persona: str | None = None  # settings.masque block, restored at doff
+    credentials: CredentialResolver = field(default_factory=CredentialResolver)
+    active_persona: Persona | None = None
+    _mirror_active: dict | None = field(default=None, repr=False)
+    _mirror_previous: dict | None = field(default=None, repr=False)
+
+    def don(self, name: str, intent: str | None = None) -> Persona | None:
+        """Become ``name``: one operation swapping prompt, tools, memory, credentials.
+
+        Lenient like every masque path — an unknown name warns and returns None,
+        leaving the current agent untouched.
+        """
+        persona = self.masques.resolve(name) if self.masques else None
+        if persona is None:
+            return None
+        plan, bound_refs = build_capability_plan(persona, HOST_SNAPSHOT)
+        tools = bound_tools(DEFAULT_TOOLS, persona)
+        memory = self.base_memory
+        if memory is not None and persona.config is not None and persona.config.memory:
+            memory = ScopedMemory(memory, persona.config.memory)
+        block = compose(persona, intent, plan=(plan, bound_refs))["identity_block"]
+
+        if self.active_persona is not None and self._mirror_active is not None:
+            # Don-over-don: the outgoing persona doffs first (Phase 2 §4 swap-first).
+            self._mirror_previous = {**self._mirror_active, "doffed_at": utc_now()}
+        # The shared checkpointer keeps thread continuity across the rebuild.
+        self.agent = LoonAgent(
+            self.llm, tools, checkpointer=self.checkpointer, memory=memory, persona=block
+        )
+        self.credentials.activate(persona)
+        self.active_persona = persona
+        set_persona_attributes(persona.otel_attributes())
+        self._mirror_active = active_record(persona, intent, plan, bound_refs)
+        write_mirror(Path(self.settings.data_dir), self._mirror_active, self._mirror_previous)
+        logger.info(
+            "donned %s v%s (tools: %s)",
+            persona.name,
+            persona.version.raw,
+            ", ".join(t.name for t in tools) or "none",
+        )
+        return persona
+
+    def doff(self) -> Persona | None:
+        """Back to baseline: all tools, unscoped memory, no persona block.
+
+        Zeroes any credential material resolved while donned; env:// secrets are
+        static, so only the in-process copies are forgotten.
+        """
+        outgoing = self.active_persona
+        self.credentials.deactivate()
+        set_persona_attributes(None)
+        self.agent = LoonAgent(
+            self.llm,
+            DEFAULT_TOOLS,
+            checkpointer=self.checkpointer,
+            memory=self.base_memory,
+            persona=self.baseline_persona,
+        )
+        self.active_persona = None
+        if outgoing is not None and self._mirror_active is not None:
+            self._mirror_previous = {**self._mirror_active, "doffed_at": utc_now()}
+            logger.info("doffed %s — baseline restored", outgoing.name)
+        self._mirror_active = None
+        write_mirror(Path(self.settings.data_dir), None, self._mirror_previous)
+        return outgoing
 
     def switch_model(self, backend_name: str, model_id: str) -> None:
         """Point the chat agent and skill runner at a different backend/model.
 
-        Runtime-only: conversation state (checkpointer), memory, and persona carry
-        over untouched; ``.env`` is not modified, so a restart reverts to it.
+        Runtime-only (``.env`` untouched; restart reverts). The agent is rebuilt with
+        its *current* tools/memory/persona, so a donned masque — including its bind-tier
+        tool scoping — survives the model switch. ``self.llm`` is updated too, so a
+        later don/doff rebuild also uses the new model.
         """
-        llm = make_llm(backend_name, settings=self.settings, model=model_id)
+        self.llm = make_llm(backend_name, settings=self.settings, model=model_id)
+        current = self.agent
         self.agent = LoonAgent(
-            llm,
-            DEFAULT_TOOLS,
-            checkpointer=self._checkpointer,
-            memory=self._memory,
-            persona=self._persona,
+            self.llm,
+            current.tools,
+            checkpointer=self.checkpointer,
+            memory=current.memory,
+            persona=current.persona,
         )
-        self.runner.llm = llm
+        self.runner.llm = self.llm
         self.active_backend = backend_name
         self.active_model = model_id
+        logger.info("switched model to %s [%s]", model_id, backend_name)
 
 
 def build_runtime(
@@ -111,18 +245,27 @@ def build_runtime(
     if settings.masques_dir:
         masque_dirs.append(Path(settings.masques_dir))
     masques = MasqueLoader(masque_dirs)
-    persona = masques.block(settings.masque) if settings.masque else None
+    baseline_persona = masques.block(settings.masque) if settings.masque else None
 
     llm = make_llm(settings=settings)
     agent = LoonAgent(
-        llm, DEFAULT_TOOLS, checkpointer=checkpointer, memory=memory, persona=persona
+        llm, DEFAULT_TOOLS, checkpointer=checkpointer, memory=memory, persona=baseline_persona
     )
 
     backend = settings.resolve_backend()
+    web_root = Path(settings.web_root)
     tools = {
         "web_search": lambda query: web_search(str(query)),
         "fetch_page": _fetch_or_raise,
         "publish_report": _make_publish(memory, settings, model_label=backend.model),
+        # Publish a markdown page to the internal website (served by adapters/web.py).
+        "publish_page": lambda ctx: str(
+            publish_page(
+                str(ctx.get("title") or ctx.get("topic") or "untitled"),
+                str(ctx.get("page") or ""),
+                web_root=web_root,
+            )
+        ),
     }
     # Exec/file tools live ONLY in the skill registry (reachable via the /code skill),
     # never in DEFAULT_TOOLS — the chat loop handles untrusted fetched web content, so an
@@ -145,9 +288,11 @@ def build_runtime(
         epochs=SessionEpochs(data_dir / "sessions.sqlite"),
         active_backend=settings.backend,
         active_model=backend.model,
-        _checkpointer=checkpointer,
-        _memory=memory,
-        _persona=persona,
+        llm=llm,
+        checkpointer=checkpointer,
+        base_memory=memory,
+        masques=masques,
+        baseline_persona=baseline_persona,
     )
 
 
@@ -278,7 +423,9 @@ def _make_publish(
             model=model_label,
             backend=settings.backend,
         )
-        path = write_report(html_text, topic, Path(settings.data_dir) / "reports")
+        # Publish into the web root so the report is immediately browsable on the internal
+        # site (adapters/web.py), not just a file on disk.
+        path = write_report(html_text, topic, Path(settings.web_root))
 
         if memory is not None:
             tldr = briefing.strip()[:_MEMORY_TLDR_CHARS]

@@ -13,7 +13,7 @@ import getpass
 
 from langchain_core.messages import AIMessage, ToolMessage
 
-from ..app import LoonRuntime, build_runtime
+from ..app import LoonRuntime, build_runtime, parse_don_command
 from ..commands import (
     HELP_TEXT,
     format_model_list,
@@ -92,6 +92,18 @@ def _inventory(runtime: LoonRuntime):
     )
 
 
+def _handle_don(runtime: LoonRuntime, name: str, intent: str | None) -> None:
+    if not name:
+        print("usage: /don <name> [intent]")
+        return
+    persona = runtime.don(name, intent)
+    if persona is None:
+        print(f"masque {name!r} not found — still baseline.")
+        return
+    tools = ", ".join(t.name for t in runtime.agent.tools) or "(none)"
+    print(f"donned {persona.name} v{persona.version.raw} — tools: {tools}\n")
+
+
 def run_cli() -> None:
     settings = get_settings()
     runtime = build_runtime(settings, progress=lambda message: print(f"  … {message}"))
@@ -136,6 +148,13 @@ def run_cli() -> None:
             else:
                 runtime.switch_model(picked.backend, picked.model)
                 print(f"now using {picked.model} [{picked.backend}] (reverts on restart)\n")
+            continue
+        if line == "/doff":
+            persona = runtime.doff()
+            print("baseline restored.\n" if persona else "no masque was active.\n")
+            continue
+        if don := parse_don_command(line):
+            _handle_don(runtime, *don)
             continue
         if line == "/retry":
             if not last_text:

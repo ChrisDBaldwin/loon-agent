@@ -67,3 +67,14 @@ def test_unknown_exec_backend_errors_helpfully(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("LOON_LOCAL_MODEL", "test-model")
     with pytest.raises(ValueError, match="LOON_EXEC_BACKEND"):
         build_runtime(_settings(tmp_path, exec_backend="firejail"))
+
+
+def test_publish_page_registered_and_reports_go_to_web_root(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOON_LOCAL_MODEL", "test-model")
+    web_root = tmp_path / "site"
+    runtime = build_runtime(_settings(tmp_path, web_root=web_root))
+    assert "publish_page" in runtime.runner.tools
+    # publish_page/publish_report write into the web root, not a separate reports dir.
+    from loon_agent.report import render_report, write_report
+    write_report(render_report(topic="t", briefing_md="x", pages=[]), "t", web_root)
+    assert list(web_root.glob("t-*.html"))

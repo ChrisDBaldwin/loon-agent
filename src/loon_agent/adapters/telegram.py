@@ -23,7 +23,7 @@ from telegram import Bot, BotCommand, Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from ..app import LoonRuntime, build_runtime
+from ..app import LoonRuntime, build_runtime, parse_don_command
 from ..commands import (
     HELP_TEXT,
     format_model_list,
@@ -187,6 +187,32 @@ class LoonTelegramBot:
         logger.info("fresh session started (thread=%s)", thread)
         await message.reply_text("Fresh conversation started — earlier context is set aside.")
 
+    async def on_don(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/don <name> [intent] — become a persona (prompt + tools + memory + creds)."""
+        if not (gated := await self._gate(update)):
+            return
+        message = gated[0]
+        if not message.text:
+            return
+        parsed = parse_don_command(message.text)
+        name, intent = parsed if parsed else ("", None)
+        if not name:
+            await message.reply_text("usage: /don <name> [intent]")
+            return
+        persona = await asyncio.to_thread(self.runtime.don, name, intent)
+        if persona is None:
+            await message.reply_text(f"masque {name!r} not found — still baseline.")
+            return
+        tools = ", ".join(t.name for t in self.runtime.agent.tools) or "(none)"
+        await message.reply_text(f"donned {persona.name} v{persona.version.raw} — tools: {tools}")
+
+    async def on_doff(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/doff — back to baseline: all tools, unscoped memory, no persona."""
+        if not (gated := await self._gate(update)):
+            return
+        persona = await asyncio.to_thread(self.runtime.doff)
+        await gated[0].reply_text("baseline restored." if persona else "no masque was active.")
+
     async def on_retry(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """/retry — send the previous message again (fresh roll on a flaky local model)."""
         if not (gated := await self._gate(update)):
@@ -273,6 +299,8 @@ def run_telegram() -> None:
                 BotCommand("models", "list models available to switch to"),
                 BotCommand("model", "switch model: /model <n>"),
                 BotCommand("status", "backend, server health, session info"),
+                BotCommand("don", "become a persona: /don <name> [intent]"),
+                BotCommand("doff", "return to baseline"),
                 BotCommand("help", "list commands"),
             ]
         )
@@ -287,6 +315,8 @@ def run_telegram() -> None:
     application.add_handler(CommandHandler("model", bot.on_model))
     application.add_handler(CommandHandler("new", bot.on_new))
     application.add_handler(CommandHandler("retry", bot.on_retry))
+    application.add_handler(CommandHandler("don", bot.on_don))
+    application.add_handler(CommandHandler("doff", bot.on_doff))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.on_message))
 
     print(f"loon telegram bot up — backend={settings.backend}, allowed users={len(allowlist)}")

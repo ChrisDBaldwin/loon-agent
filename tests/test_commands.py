@@ -102,7 +102,8 @@ def test_pick_model_validates_input() -> None:
 
 def _bare_runtime(**overrides) -> LoonRuntime:
     defaults = dict(
-        agent=SimpleNamespace(),
+        # switch_model carries the live agent's tools/memory/persona into the rebuild.
+        agent=SimpleNamespace(tools=[], memory=None, persona=None),
         skills={},
         runner=SimpleNamespace(llm=None),
         settings=Settings(memory_backend="sqlite"),
@@ -127,6 +128,22 @@ def test_switch_model_swaps_agent_and_runner_llm(monkeypatch) -> None:
     assert runtime.active_model == "big-model"
     assert runtime.runner.llm is fake_llm
     assert runtime.agent.graph is not None  # rebuilt LoonAgent, compiled
+    assert runtime.llm is fake_llm  # a later don/doff rebuild also uses the new model
+
+
+def test_switch_model_preserves_donned_state() -> None:
+    """A masque's persona block, scoped memory, and bind-tier tools survive /model."""
+    from fakes import FakeChat
+
+    donned = SimpleNamespace(tools=[], memory="scoped-memory", persona="MASQUE BLOCK")
+    runtime = _bare_runtime(agent=donned)
+
+    with patch("loon_agent.app.make_llm", return_value=FakeChat(replies=["hi"], calls=[])):
+        runtime.switch_model("gpubox", "big-model")
+
+    assert runtime.agent.persona == "MASQUE BLOCK"
+    assert runtime.agent.memory == "scoped-memory"
+    assert runtime.agent.tools == []
 
 
 # --- status --------------------------------------------------------------------------

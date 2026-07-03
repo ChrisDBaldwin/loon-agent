@@ -115,6 +115,8 @@ class LoonAgent:
         persona: str | None = None,
     ) -> None:
         self.memory = memory
+        self.tools = list(tools)  # what the model can actually call (bind-tier truth)
+        self.persona = persona
         self.graph = build_graph(
             llm, tools, checkpointer=checkpointer, memory=memory, persona=persona
         )

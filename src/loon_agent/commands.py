@@ -27,6 +27,8 @@ HELP_TEXT = """loon — commands:
 /retry — send your previous message again
 /models — list models available across configured backends
 /model <n> — switch to model #n from /models (until restart)
+/don <name> [intent] — become a persona (prompt + tools + memory)
+/doff — return to baseline
 /status — backend, model, server health, session info
 /help — this text
 
