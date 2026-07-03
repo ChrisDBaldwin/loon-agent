@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import httpx
 
 from loon_agent.tools.web import FetchedPage, SearchResult, fetch_page, web_search
+
+
+def _cli_result(returncode: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
+    result = MagicMock(spec=subprocess.CompletedProcess)
+    result.returncode = returncode
+    result.stdout = stdout
+    result.stderr = stderr
+    return result
 
 _HTML = """
 <html><head><title>  Loons &amp; Lakes  </title></head><body>
@@ -19,35 +29,60 @@ _HTML = """
 # --- web_search -----------------------------------------------------------------
 
 
-def test_web_search_maps_ddgs_rows() -> None:
-    rows = [
-        {"title": "Loon", "href": "https://example.com/loon", "body": "a bird"},
-        {"title": "No url row is dropped", "body": "x"},
-    ]
-    with patch("loon_agent.tools.web.DDGS") as ddgs:
-        ddgs.return_value.text.return_value = rows
+def test_web_search_maps_searxng_rows() -> None:
+    payload = json.dumps(
+        {
+            "results": [
+                {"title": "Loon", "url": "https://example.com/loon", "content": "a bird"},
+                {"title": "No url row is dropped", "content": "x"},
+            ]
+        }
+    )
+    with (
+        patch("loon_agent.tools.web.shutil.which", return_value="/usr/local/bin/esper-search"),
+        patch("loon_agent.tools.web.subprocess.run", return_value=_cli_result(stdout=payload)),
+    ):
         results = web_search("loon", max_results=5)
 
     assert results == [SearchResult(title="Loon", url="https://example.com/loon", snippet="a bird")]
 
 
-def test_web_search_retries_then_gives_up_empty() -> None:
+def test_web_search_missing_binary_returns_empty() -> None:
+    with patch("loon_agent.tools.web.shutil.which", return_value=None):
+        results = web_search("loon")
+
+    assert results == []
+
+
+def test_web_search_rate_limited_gives_up_without_retry() -> None:
     with (
-        patch("loon_agent.tools.web.DDGS") as ddgs,
+        patch("loon_agent.tools.web.shutil.which", return_value="/usr/local/bin/esper-search"),
+        patch(
+            "loon_agent.tools.web.subprocess.run",
+            return_value=_cli_result(returncode=2, stderr="rate limited"),
+        ) as run,
         patch("loon_agent.tools.web.time.sleep") as nap,
     ):
-        ddgs.return_value.text.side_effect = RuntimeError("rate limited")
         results = web_search("loon", retries=2)
 
     assert results == []
-    assert ddgs.return_value.text.call_count == 3
-    assert nap.call_count == 2  # backoff between attempts, none after the last
+    assert run.call_count == 1  # exit 2 already waited out the window; no local retry
+    assert nap.call_count == 0
 
 
 def test_web_search_recovers_on_second_attempt() -> None:
-    ok = [{"title": "t", "href": "https://e.com", "body": "s"}]
-    with patch("loon_agent.tools.web.DDGS") as ddgs, patch("loon_agent.tools.web.time.sleep"):
-        ddgs.return_value.text.side_effect = [RuntimeError("flake"), ok]
+    ok = json.dumps({"results": [{"title": "t", "url": "https://e.com", "content": "s"}]})
+    with (
+        patch("loon_agent.tools.web.shutil.which", return_value="/usr/local/bin/esper-search"),
+        patch(
+            "loon_agent.tools.web.subprocess.run",
+            side_effect=[
+                _cli_result(returncode=3, stderr="upstream error"),
+                _cli_result(stdout=ok),
+            ],
+        ),
+        patch("loon_agent.tools.web.time.sleep"),
+    ):
         results = web_search("loon", retries=2)
 
     assert [r.url for r in results] == ["https://e.com"]

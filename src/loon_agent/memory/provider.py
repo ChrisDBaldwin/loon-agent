@@ -13,6 +13,16 @@ interchangeable, and the agent core depends only on this interface.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
+
+
+def notes_block(notes_path: Path) -> str:
+    """Render the standing markdown notes file as a system-prompt block (or "")."""
+    if notes_path.exists():
+        notes = notes_path.read_text(encoding="utf-8").strip()
+        if notes:
+            return f"Standing notes (from {notes_path.name}):\n{notes}"
+    return ""
 
 
 class MemoryProvider(ABC):

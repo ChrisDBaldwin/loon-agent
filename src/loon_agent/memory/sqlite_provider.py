@@ -15,6 +15,8 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from .provider import notes_block
+
 # FTS5 reserves a lot of punctuation; restrict matching to bare word tokens (OR-joined).
 _WORD = re.compile(r"\w+")
 
@@ -49,11 +51,7 @@ class SqliteMemoryProvider:
     # --- MemoryProvider contract -------------------------------------------------
 
     def system_prompt_block(self) -> str:
-        if self.notes_path.exists():
-            notes = self.notes_path.read_text(encoding="utf-8").strip()
-            if notes:
-                return f"Standing notes (from {self.notes_path.name}):\n{notes}"
-        return ""
+        return notes_block(self.notes_path)
 
     def prefetch(self, query: str, session_id: str) -> str:
         rows = self._search(query)

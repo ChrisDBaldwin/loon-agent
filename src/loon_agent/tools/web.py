@@ -1,22 +1,31 @@
-"""Web research primitives: search (ddgs) and fetch/extract (httpx + trafilatura).
+"""Web research primitives: search (esper-search/SearXNG) and fetch/extract (httpx +
+trafilatura).
 
 Plain functions (not LangChain ``@tool``s) — they are called deterministically by the
 skill engine's tool registry. Both degrade instead of raising where the pipeline can
 survive it: a failed search retries with backoff then returns ``[]``; a failed fetch
 returns a :class:`FetchedPage` carrying its error so the run can skip it and report.
+
+Search shells out to the ``esper-search`` CLI (a stdlib-only client for the private
+SearXNG instance on the Esper network — see ``docs/esper-search.md``) rather than
+calling SearXNG directly, so every agent on the network shares its Redis-backed query
+cache and rate limit instead of each reimplementing them.
 """
 
 from __future__ import annotations
 
 import html as _html
+import json
 import logging
+import os
 import re
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 
 import httpx
 import trafilatura
-from ddgs import DDGS
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +35,7 @@ _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 DEFAULT_MAX_RESULTS = 5
 DEFAULT_PAGE_CHARS = 12_000
 DEFAULT_TIMEOUT = 30.0
+ESPER_SEARCH_BIN = os.environ.get("LOON_ESPER_SEARCH_BIN", "esper-search")
 
 
 @dataclass(frozen=True)
@@ -61,24 +71,63 @@ def web_search(
     *,
     retries: int = 2,
     backoff: float = 2.0,
+    timeout: float = 45.0,
 ) -> list[SearchResult]:
-    """Search the web; returns [] if every attempt fails (caller decides whether to abort)."""
+    """Search via the esper-search/SearXNG CLI; returns [] if every attempt fails.
+
+    esper-search itself already waits out a full rate-limit window (exit 2 if the
+    wait cap is hit) and reports upstream failures as exit 3 — retries here are for
+    the CLI being transiently missing/unreachable, not for re-fighting the rate limit.
+    """
+    if shutil.which(ESPER_SEARCH_BIN) is None:
+        logger.warning(
+            "web_search: %r not found on PATH; see docs/esper-search.md to install it",
+            ESPER_SEARCH_BIN,
+        )
+        return []
+
     for attempt in range(retries + 1):
         try:
-            rows = DDGS().text(query, max_results=max_results) or []
-            return [
-                SearchResult(
-                    title=(row.get("title") or "").strip(),
-                    url=(row.get("href") or row.get("url") or "").strip(),
-                    snippet=(row.get("body") or row.get("snippet") or "").strip(),
-                )
-                for row in rows
-                if row.get("href") or row.get("url")
-            ]
-        except Exception as exc:  # noqa: BLE001 - ddgs raises assorted network errors
-            logger.warning("web_search %r attempt %d failed: %s", query, attempt + 1, exc)
+            proc = subprocess.run(
+                [ESPER_SEARCH_BIN, query],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("web_search %r attempt %d timed out", query, attempt + 1)
             if attempt < retries:
                 time.sleep(backoff * (attempt + 1))
+            continue
+
+        if proc.returncode != 0:
+            logger.warning(
+                "web_search %r attempt %d failed (exit %d): %s",
+                query, attempt + 1, proc.returncode, proc.stderr.strip(),
+            )
+            # Exit 2 = rate limited (already waited out the cap) — retrying won't help.
+            if proc.returncode == 2 or attempt >= retries:
+                return []
+            time.sleep(backoff * (attempt + 1))
+            continue
+
+        try:
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            logger.warning("web_search %r: bad JSON from esper-search: %s", query, exc)
+            return []
+
+        rows = payload.get("results") or []
+        return [
+            SearchResult(
+                title=(row.get("title") or "").strip(),
+                url=(row.get("url") or "").strip(),
+                snippet=(row.get("content") or "").strip(),
+            )
+            for row in rows[:max_results]
+            if row.get("url")
+        ]
     return []
 
 

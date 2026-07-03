@@ -15,12 +15,12 @@ dependencies = [
     "opentelemetry-exporter-otlp>=1.30",
     "openinference-instrumentation-langchain>=0.1",
     "python-telegram-bot>=22.0",
-    "ddgs>=9.14.4",
     "httpx>=0.28.1",
     "trafilatura>=2.1.0",
     "pyyaml>=6.0.3",
     "markdown-it-py>=4.2.0",
     "opentelemetry-instrumentation-openai-v2>=2.4b0",
+    "chromadb>=1.5.9",
 ]
 
 [project.scripts]

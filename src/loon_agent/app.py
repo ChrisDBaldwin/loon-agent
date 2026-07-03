@@ -19,7 +19,7 @@ from .config import Settings, get_settings
 from .graph import LoonAgent
 from .llm import make_llm
 from .masques import MasqueLoader
-from .memory import SqliteMemoryProvider
+from .memory import ChromaMemoryProvider, SqliteMemoryProvider
 from .memory.provider import MemoryProvider
 from .report import render_report, write_report
 from .session import SessionEpochs
@@ -60,10 +60,22 @@ def build_runtime(
     checkpoint_conn = sqlite3.connect(data_dir / "checkpoints.sqlite", check_same_thread=False)
     checkpointer = SqliteSaver(checkpoint_conn)
 
-    memory = SqliteMemoryProvider(
-        db_path=data_dir / "memory.sqlite",
-        notes_path=data_dir / "MEMORY.md",
-    )
+    memory: MemoryProvider
+    if settings.memory_backend == "chroma":
+        memory = ChromaMemoryProvider(
+            db_path=data_dir / "chroma",
+            notes_path=data_dir / "MEMORY.md",
+        )
+    elif settings.memory_backend == "sqlite":
+        memory = SqliteMemoryProvider(
+            db_path=data_dir / "memory.sqlite",
+            notes_path=data_dir / "MEMORY.md",
+        )
+    else:
+        raise ValueError(
+            f"Unknown LOON_MEMORY_BACKEND {settings.memory_backend!r}; "
+            "expected 'sqlite' or 'chroma'."
+        )
 
     # Local masques/ wins on collisions; LOON_MASQUES_DIR extends the catalog
     # (point it at any masques-style personas directory).

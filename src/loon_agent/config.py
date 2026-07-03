@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     # off | console | otlp
     otel: str = "off"
 
+    # Long-term memory (see memory/provider.py). sqlite = FTS5 keyword recall, no
+    # extra deps; chroma = local embeddings + nearest-neighbor recall, survives paraphrase.
+    memory_backend: str = "sqlite"
+
     # Skills + masques (see docs/spec-research-skills.md).
     skills_dir: Path = Path("skills")
     masques_dir: Path | None = None  # extra masque catalog (a masques-style personas dir)
