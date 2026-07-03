@@ -78,6 +78,16 @@ Send `/new` (Telegram or CLI) to start a fresh conversation: the checkpointed hi
 never compacts, so long-running chats grow the prompt every turn — `/new` rotates to a
 fresh thread while the old one stays on disk and long-term memory keeps working.
 
+Send `/don <masque> [intent]` to have the agent *become* a persona — one operation
+swaps the system prompt, tool access, memory scope, and credentials together, and
+`/doff` restores baseline. Identities come from `masques/` (or a
+[masques](https://github.com/ChrisDBaldwin/masques) catalog); an optional
+`<name>.persona.yaml` sidecar binds capabilities, enforced structurally: tools
+outside its allow-list are never handed to the model, so they don't exist in its
+tool schema (the `bind` tier). The active persona is mirrored to
+`data/masque.session.yaml` — never any secret material — and stamped onto OTEL
+spans as `persona.*` attributes.
+
 Smoke-test a backend directly:
 
 ```bash

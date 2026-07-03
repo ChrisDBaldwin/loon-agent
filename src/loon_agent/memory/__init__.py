@@ -7,6 +7,13 @@ future OpenViking-backed one) drops in later without touching the agent core.
 
 from .chroma_provider import ChromaMemoryProvider
 from .provider import MemoryProvider, NullMemoryProvider
+from .scoped import ScopedMemory
 from .sqlite_provider import SqliteMemoryProvider
 
-__all__ = ["ChromaMemoryProvider", "MemoryProvider", "NullMemoryProvider", "SqliteMemoryProvider"]
+__all__ = [
+    "ChromaMemoryProvider",
+    "MemoryProvider",
+    "NullMemoryProvider",
+    "ScopedMemory",
+    "SqliteMemoryProvider",
+]

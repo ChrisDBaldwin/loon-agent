@@ -13,13 +13,16 @@ import getpass
 
 from langchain_core.messages import AIMessage, ToolMessage
 
-from ..app import LoonRuntime, build_runtime
+from ..app import LoonRuntime, build_runtime, parse_don_command
 from ..config import get_settings
 from ..graph import _text
 from ..session import MessageEvent, SessionSource, build_session_key
 from ..skills.engine import SkillRunError
 
-_BANNER = "loon-agent — type a message, /skill <name> <args>, /new for a fresh session, /exit."
+_BANNER = (
+    "loon-agent — type a message, /skill <name> <args>, /don <masque> [intent], "
+    "/doff, /new for a fresh session, /exit."
+)
 _EXIT = {"/exit", "/quit", "exit", "quit"}
 
 
@@ -77,10 +80,21 @@ def _run_skill(runtime: LoonRuntime, name: str, args_text: str) -> None:
         print(f"  (skipped: {note})")
 
 
+def _handle_don(runtime: LoonRuntime, name: str, intent: str | None) -> None:
+    if not name:
+        print("usage: /don <name> [intent]")
+        return
+    persona = runtime.don(name, intent)
+    if persona is None:
+        print(f"masque {name!r} not found — still baseline.")
+        return
+    tools = ", ".join(t.name for t in runtime.agent.tools) or "(none)"
+    print(f"donned {persona.name} v{persona.version.raw} — tools: {tools}\n")
+
+
 def run_cli() -> None:
     settings = get_settings()
     runtime = build_runtime(settings, progress=lambda message: print(f"  … {message}"))
-    agent = runtime.agent
     source = SessionSource(platform="cli", chat_id="local", user_id=getpass.getuser())
     base_key = build_session_key(source)
     session_key = runtime.epochs.thread_id(base_key)
@@ -103,13 +117,20 @@ def run_cli() -> None:
             session_key = runtime.epochs.bump(base_key)
             print(f"fresh session started: {session_key}\n")
             continue
+        if line == "/doff":
+            persona = runtime.doff()
+            print("baseline restored.\n" if persona else "no masque was active.\n")
+            continue
+        if don := parse_don_command(line):
+            _handle_don(runtime, *don)
+            continue
 
         if command := parse_skill_command(line):
             _run_skill(runtime, *command)
             continue
 
         event = MessageEvent(source=source, text=line)
-        for message in agent.stream(event.text, session_key):
+        for message in runtime.agent.stream(event.text, session_key):
             _render(message)
 
     print("bye.")

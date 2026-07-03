@@ -21,7 +21,11 @@ dependencies = [
     "markdown-it-py>=4.2.0",
     "opentelemetry-instrumentation-openai-v2>=2.4b0",
     "chromadb>=1.5.9",
+    "masques-core",
 ]
+
+[tool.uv.sources]
+masques-core = { path = "../../masques/services/core", editable = true }
 
 [project.scripts]
 loon-agent = "loon_agent.__main__:main"

@@ -27,8 +27,10 @@ Gated by ``LOON_OTEL``:
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 
 from opentelemetry import metrics, trace
+from opentelemetry.context import Context
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
     ConsoleMetricExporter,
@@ -36,7 +38,7 @@ from opentelemetry.sdk.metrics.export import (
     PeriodicExportingMetricReader,
 )
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import Span, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
@@ -46,6 +48,33 @@ from opentelemetry.sdk.trace.export import (
 from .config import Settings
 
 _configured = False
+
+# The donned persona's attribution trio (persona.id / persona.version /
+# persona.identity_hash — Phase 3 §6). Empty at baseline: no masque, no attributes.
+_persona_attributes: dict[str, str] = {}
+
+
+def set_persona_attributes(attributes: Mapping[str, str] | None) -> None:
+    """Stamp (or, with None, clear) the active persona's OTEL attribution.
+
+    Called by the runtime at don/doff. Safe to call with telemetry off — the
+    dict just never reaches a span processor.
+    """
+    _persona_attributes.clear()
+    if attributes:
+        _persona_attributes.update(attributes)
+
+
+class PersonaSpanProcessor(SpanProcessor):
+    """Stamps persona.* onto every span started while a masque is donned.
+
+    Attribution is event-carried on the host's existing pipeline (Phase 3 §6):
+    masques provides the three attributes, loon provides the spans.
+    """
+
+    def on_start(self, span: Span, parent_context: Context | None = None) -> None:
+        for key, value in _persona_attributes.items():
+            span.set_attribute(key, value)
 
 
 def setup_telemetry(settings: Settings) -> None:
@@ -62,6 +91,7 @@ def setup_telemetry(settings: Settings) -> None:
 
     resource = Resource.create({SERVICE_NAME: "loon-agent"})
     tracer_provider = TracerProvider(resource=resource)
+    tracer_provider.add_span_processor(PersonaSpanProcessor())
 
     metric_reader: MetricReader
     if mode == "console":

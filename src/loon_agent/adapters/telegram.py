@@ -23,7 +23,7 @@ from telegram import Bot, Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from ..app import build_runtime
+from ..app import LoonRuntime, build_runtime, parse_don_command
 from ..config import get_settings
 from ..graph import LoonAgent
 from ..session import MessageEvent, SessionEpochs, SessionSource, build_session_key
@@ -98,10 +98,17 @@ class LoonTelegramBot:
         agent: LoonAgent,
         allowlist: frozenset[int],
         epochs: SessionEpochs | None = None,
+        runtime: LoonRuntime | None = None,
     ) -> None:
-        self.agent = agent
+        self._agent = agent
         self.allowlist = allowlist
         self.epochs = epochs
+        self.runtime = runtime
+
+    @property
+    def agent(self) -> LoonAgent:
+        """The live agent — don/doff rebuilds it on the runtime, so never cache it."""
+        return self.runtime.agent if self.runtime is not None else self._agent
 
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message, user = update.effective_message, update.effective_user
@@ -134,6 +141,49 @@ class LoonTelegramBot:
         thread = self.epochs.bump(base_key)
         logger.info("fresh session started (thread=%s)", thread)
         await message.reply_text("Fresh conversation started — earlier context is set aside.")
+
+    async def on_don(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/don <name> [intent] — become a persona (prompt + tools + memory + creds)."""
+        message, user = update.effective_message, update.effective_user
+        if message is None or user is None or not message.text:
+            return
+        if user.id not in self.allowlist:
+            await message.reply_text(
+                f"Sorry, I only talk to my humans. (your telegram id: {user.id})"
+            )
+            return
+        if self.runtime is None:
+            await message.reply_text("Masques aren't enabled here.")
+            return
+        parsed = parse_don_command(message.text)
+        name, intent = parsed if parsed else ("", None)
+        if not name:
+            await message.reply_text("usage: /don <name> [intent]")
+            return
+        persona = await asyncio.to_thread(self.runtime.don, name, intent)
+        if persona is None:
+            await message.reply_text(f"masque {name!r} not found — still baseline.")
+            return
+        tools = ", ".join(t.name for t in self.runtime.agent.tools) or "(none)"
+        await message.reply_text(f"donned {persona.name} v{persona.version.raw} — tools: {tools}")
+
+    async def on_doff(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/doff — back to baseline: all tools, unscoped memory, no persona."""
+        message, user = update.effective_message, update.effective_user
+        if message is None or user is None:
+            return
+        if user.id not in self.allowlist:
+            await message.reply_text(
+                f"Sorry, I only talk to my humans. (your telegram id: {user.id})"
+            )
+            return
+        if self.runtime is None:
+            await message.reply_text("Masques aren't enabled here.")
+            return
+        persona = await asyncio.to_thread(self.runtime.doff)
+        await message.reply_text(
+            "baseline restored." if persona else "no masque was active."
+        )
 
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message, user, chat = update.effective_message, update.effective_user, update.effective_chat
@@ -183,11 +233,13 @@ def run_telegram() -> None:
         )
 
     runtime = build_runtime(settings)
-    bot = LoonTelegramBot(runtime.agent, allowlist, epochs=runtime.epochs)
+    bot = LoonTelegramBot(runtime.agent, allowlist, epochs=runtime.epochs, runtime=runtime)
 
     application = Application.builder().token(settings.telegram_token).build()
     application.add_handler(CommandHandler("start", bot.on_start))
     application.add_handler(CommandHandler("new", bot.on_new))
+    application.add_handler(CommandHandler("don", bot.on_don))
+    application.add_handler(CommandHandler("doff", bot.on_doff))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.on_message))
 
     print(f"loon telegram bot up — backend={settings.backend}, allowed users={len(allowlist)}")

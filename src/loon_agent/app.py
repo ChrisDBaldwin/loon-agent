@@ -3,37 +3,100 @@
 Kept separate from any single adapter so the CLI and Telegram build the same runtime
 the same way. ``build_agent`` remains the light entry point for chat-only adapters;
 ``build_runtime`` adds the skill engine (discovered skills, tool registry, masques).
+
+The runtime is also the masques reference host (Phase 3): ``don()`` swaps system
+prompt, tool access, memory scope and credentials together by rebuilding the
+compiled graph — the ``bind`` tier, where a denied tool is structurally absent
+from the model's schema rather than advised away.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.tools import BaseTool
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
+from masques_core import (
+    HOST_NATIVE_SERVER,
+    HostSnapshot,
+    Persona,
+    build_capability_plan,
+    compose,
+)
 
 from .config import Settings, get_settings
+from .credentials import CredentialResolver
 from .exec.backend import ExecBackend
 from .exec.docker_backend import DockerExecBackend, DockerLimits
 from .graph import LoonAgent
 from .llm import make_llm
 from .masques import MasqueLoader
-from .memory import ChromaMemoryProvider, SqliteMemoryProvider
+from .memory import ChromaMemoryProvider, ScopedMemory, SqliteMemoryProvider
 from .memory.provider import MemoryProvider
+from .mirror import active_record, utc_now, write_mirror
 from .report import render_report, write_report
 from .session import SessionEpochs
 from .skills import Skill, discover_skills
 from .skills.engine import SkillRunner
-from .telemetry import setup_telemetry
+from .telemetry import set_persona_attributes, setup_telemetry
 from .tools import DEFAULT_TOOLS
 from .tools.exec import delete_file, edit_file, run_command, write_file
 from .tools.publish import publish_page
 from .tools.web import FetchedPage, fetch_page, web_search
 
+logger = logging.getLogger(__name__)
+
 _MEMORY_TLDR_CHARS = 400
+
+
+def parse_don_command(line: str) -> tuple[str, str | None] | None:
+    """``/don name intent…`` -> (name, intent or None); bare ``/don`` -> ("", None)."""
+    line = line.strip()
+    if line != "/don" and not line.startswith("/don "):
+        return None
+    rest = line[len("/don") :].strip()
+    if not rest:
+        return ("", None)
+    name, _, intent = rest.partition(" ")
+    return (name, intent.strip() or None)
+
+
+def bound_tools(all_tools: list[BaseTool], persona: Persona) -> list[BaseTool]:
+    """The bind tier: the subset of native tools the persona's ``host`` binding allows.
+
+    A tool outside the allow/deny is never passed to ``bind_tools``/``ToolNode``,
+    so it does not exist in the model's tool schema. No sidecar or no ``host``
+    binding means the full registry (a lens-only masque changes no capabilities).
+    """
+    binding = None
+    if persona.config is not None:
+        binding = next(
+            (b for b in persona.config.mcp if b.server == HOST_NATIVE_SERVER), None
+        )
+    if binding is None:
+        return list(all_tools)
+    if not binding.enabled:
+        return []
+    tools = list(all_tools)
+    if binding.allow is not None:
+        tools = [t for t in tools if t.name in binding.allow]
+    if binding.deny:
+        tools = [t for t in tools if t.name not in binding.deny]
+    return tools
+
+
+# What loon offers a capability plan: its native tool registry, at the strongest
+# tier, with a scoped memory seam (Phase 3 §4-§5).
+HOST_SNAPSHOT = HostSnapshot(
+    servers=frozenset({HOST_NATIVE_SERVER}), achievable_tier="bind", memory_seam=True
+)
 
 
 @dataclass
@@ -45,6 +108,76 @@ class LoonRuntime:
     runner: SkillRunner
     settings: Settings
     epochs: SessionEpochs
+    # Don/doff machinery: the parts a graph rebuild needs again.
+    llm: BaseChatModel | None = None
+    checkpointer: BaseCheckpointSaver | None = None
+    base_memory: MemoryProvider | None = None
+    masques: MasqueLoader | None = None
+    baseline_persona: str | None = None  # settings.masque block, restored at doff
+    credentials: CredentialResolver = field(default_factory=CredentialResolver)
+    active_persona: Persona | None = None
+    _mirror_active: dict | None = field(default=None, repr=False)
+    _mirror_previous: dict | None = field(default=None, repr=False)
+
+    def don(self, name: str, intent: str | None = None) -> Persona | None:
+        """Become ``name``: one operation swapping prompt, tools, memory, credentials.
+
+        Lenient like every masque path — an unknown name warns and returns None,
+        leaving the current agent untouched.
+        """
+        persona = self.masques.resolve(name) if self.masques else None
+        if persona is None:
+            return None
+        plan, bound_refs = build_capability_plan(persona, HOST_SNAPSHOT)
+        tools = bound_tools(DEFAULT_TOOLS, persona)
+        memory = self.base_memory
+        if memory is not None and persona.config is not None and persona.config.memory:
+            memory = ScopedMemory(memory, persona.config.memory)
+        block = compose(persona, intent, plan=(plan, bound_refs))["identity_block"]
+
+        if self.active_persona is not None and self._mirror_active is not None:
+            # Don-over-don: the outgoing persona doffs first (Phase 2 §4 swap-first).
+            self._mirror_previous = {**self._mirror_active, "doffed_at": utc_now()}
+        # The shared checkpointer keeps thread continuity across the rebuild.
+        self.agent = LoonAgent(
+            self.llm, tools, checkpointer=self.checkpointer, memory=memory, persona=block
+        )
+        self.credentials.activate(persona)
+        self.active_persona = persona
+        set_persona_attributes(persona.otel_attributes())
+        self._mirror_active = active_record(persona, intent, plan, bound_refs)
+        write_mirror(Path(self.settings.data_dir), self._mirror_active, self._mirror_previous)
+        logger.info(
+            "donned %s v%s (tools: %s)",
+            persona.name,
+            persona.version.raw,
+            ", ".join(t.name for t in tools) or "none",
+        )
+        return persona
+
+    def doff(self) -> Persona | None:
+        """Back to baseline: all tools, unscoped memory, no persona block.
+
+        Zeroes any credential material resolved while donned; env:// secrets are
+        static, so only the in-process copies are forgotten.
+        """
+        outgoing = self.active_persona
+        self.credentials.deactivate()
+        set_persona_attributes(None)
+        self.agent = LoonAgent(
+            self.llm,
+            DEFAULT_TOOLS,
+            checkpointer=self.checkpointer,
+            memory=self.base_memory,
+            persona=self.baseline_persona,
+        )
+        self.active_persona = None
+        if outgoing is not None and self._mirror_active is not None:
+            self._mirror_previous = {**self._mirror_active, "doffed_at": utc_now()}
+            logger.info("doffed %s — baseline restored", outgoing.name)
+        self._mirror_active = None
+        write_mirror(Path(self.settings.data_dir), None, self._mirror_previous)
+        return outgoing
 
 
 def build_runtime(
@@ -87,11 +220,11 @@ def build_runtime(
     if settings.masques_dir:
         masque_dirs.append(Path(settings.masques_dir))
     masques = MasqueLoader(masque_dirs)
-    persona = masques.block(settings.masque) if settings.masque else None
+    baseline_persona = masques.block(settings.masque) if settings.masque else None
 
     llm = make_llm(settings=settings)
     agent = LoonAgent(
-        llm, DEFAULT_TOOLS, checkpointer=checkpointer, memory=memory, persona=persona
+        llm, DEFAULT_TOOLS, checkpointer=checkpointer, memory=memory, persona=baseline_persona
     )
 
     backend = settings.resolve_backend()
@@ -128,6 +261,11 @@ def build_runtime(
         runner=runner,
         settings=settings,
         epochs=SessionEpochs(data_dir / "sessions.sqlite"),
+        llm=llm,
+        checkpointer=checkpointer,
+        base_memory=memory,
+        masques=masques,
+        baseline_persona=baseline_persona,
     )
 
 

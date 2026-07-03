@@ -1191,6 +1191,7 @@ dependencies = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint-sqlite" },
     { name = "markdown-it-py" },
+    { name = "masques-core" },
     { name = "openinference-instrumentation-langchain" },
     { name = "opentelemetry-exporter-otlp" },
     { name = "opentelemetry-instrumentation-openai-v2" },
@@ -1217,6 +1218,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.0" },
     { name = "langgraph-checkpoint-sqlite" },
     { name = "markdown-it-py", specifier = ">=4.2.0" },
+    { name = "masques-core", editable = "../../masques/services/core" },
     { name = "openinference-instrumentation-langchain", specifier = ">=0.1" },
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.30" },
     { name = "opentelemetry-instrumentation-openai-v2", specifier = ">=2.4b0" },
@@ -1364,6 +1366,22 @@ sdist = { url = "https://files.pythonhosted.org/packages/06/ff/7841249c247aa650a
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/81/4da04ced5a082363ecfa159c010d200ecbd959ae410c10c0264a38cac0f5/markdown_it_py-4.2.0-py3-none-any.whl", hash = "sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a", size = 91687, upload-time = "2026-05-07T12:08:27.182Z" },
 ]
+
+[[package]]
+name = "masques-core"
+version = "0.1.0"
+source = { editable = "../../masques/services/core" }
+dependencies = [
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5.0" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "mdurl"
