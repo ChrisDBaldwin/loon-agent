@@ -30,6 +30,7 @@ from .skills.engine import SkillRunner
 from .telemetry import setup_telemetry
 from .tools import DEFAULT_TOOLS
 from .tools.exec import delete_file, edit_file, run_command, write_file
+from .tools.publish import publish_page
 from .tools.web import FetchedPage, fetch_page, web_search
 
 _MEMORY_TLDR_CHARS = 400
@@ -94,10 +95,19 @@ def build_runtime(
     )
 
     backend = settings.resolve_backend()
+    web_root = Path(settings.web_root)
     tools = {
         "web_search": lambda query: web_search(str(query)),
         "fetch_page": _fetch_or_raise,
         "publish_report": _make_publish(memory, settings, model_label=backend.model),
+        # Publish a markdown page to the internal website (served by adapters/web.py).
+        "publish_page": lambda ctx: str(
+            publish_page(
+                str(ctx.get("title") or ctx.get("topic") or "untitled"),
+                str(ctx.get("page") or ""),
+                web_root=web_root,
+            )
+        ),
     }
     # Exec/file tools live ONLY in the skill registry (reachable via the /code skill),
     # never in DEFAULT_TOOLS — the chat loop handles untrusted fetched web content, so an
@@ -248,7 +258,9 @@ def _make_publish(
             model=model_label,
             backend=settings.backend,
         )
-        path = write_report(html_text, topic, Path(settings.data_dir) / "reports")
+        # Publish into the web root so the report is immediately browsable on the internal
+        # site (adapters/web.py), not just a file on disk.
+        path = write_report(html_text, topic, Path(settings.web_root))
 
         if memory is not None:
             tldr = briefing.strip()[:_MEMORY_TLDR_CHARS]
