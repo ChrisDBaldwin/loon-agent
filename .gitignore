@@ -17,3 +17,6 @@ __pycache__/
 *.sqlite3
 MEMORY.md
 .loon/
+
+# Claude Code local worktrees / scratch
+.claude/

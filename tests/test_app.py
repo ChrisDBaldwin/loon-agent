@@ -9,13 +9,14 @@ from loon_agent.config import Settings
 from loon_agent.memory import ChromaMemoryProvider, SqliteMemoryProvider
 
 
-def _settings(tmp_path, *, memory_backend: str = "sqlite", **kwargs) -> Settings:
-    # otel="off" and memory_backend pinned explicitly: the real project .env sets
-    # LOON_OTEL=otlp and LOON_MEMORY_BACKEND=chroma, and pydantic-settings reads
-    # those ambient values for any field not passed here — pin everything these
-    # tests assert on so they don't depend on what happens to be in .env.
+def _settings(tmp_path, *, memory_backend: str = "sqlite", exec_backend: str = "off", **kwargs):
+    # otel/memory_backend/exec_backend pinned explicitly: the real project .env sets
+    # LOON_OTEL=otlp and LOON_MEMORY_BACKEND=chroma, and pydantic-settings reads those
+    # ambient values for any field not passed here — pin everything these tests assert on
+    # so they don't depend on what happens to be in .env.
     return Settings(
-        data_dir=tmp_path, backend="local", otel="off", memory_backend=memory_backend, **kwargs
+        data_dir=tmp_path, backend="local", otel="off",
+        memory_backend=memory_backend, exec_backend=exec_backend, **kwargs
     )
 
 
@@ -35,3 +36,34 @@ def test_unknown_memory_backend_errors_helpfully(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("LOON_LOCAL_MODEL", "test-model")
     with pytest.raises(ValueError, match="LOON_MEMORY_BACKEND"):
         build_runtime(_settings(tmp_path, memory_backend="postgres"))
+
+
+def test_exec_off_means_no_exec_tools_in_registry(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOON_LOCAL_MODEL", "test-model")
+    runtime = build_runtime(_settings(tmp_path))  # exec_backend defaults to "off"
+    assert "run_command" not in runtime.runner.tools
+    assert "web_search" in runtime.runner.tools  # research tools still present
+
+
+def test_exec_docker_wires_exec_tools_into_skill_registry(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOON_LOCAL_MODEL", "test-model")
+    runtime = build_runtime(
+        _settings(tmp_path, exec_backend="docker", exec_image="loon-toolbox@sha256:abc")
+    )
+    for name in ("run_command", "write_file", "edit_file", "delete_file"):
+        assert name in runtime.runner.tools
+    # Exec tools must NOT leak into the always-on chat-loop tool set (DEFAULT_TOOLS).
+    from loon_agent.tools import DEFAULT_TOOLS
+    assert "run_command" not in {t.name for t in DEFAULT_TOOLS}
+
+
+def test_exec_docker_without_image_errors_helpfully(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOON_LOCAL_MODEL", "test-model")
+    with pytest.raises(ValueError, match="LOON_EXEC_IMAGE"):
+        build_runtime(_settings(tmp_path, exec_backend="docker"))
+
+
+def test_unknown_exec_backend_errors_helpfully(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOON_LOCAL_MODEL", "test-model")
+    with pytest.raises(ValueError, match="LOON_EXEC_BACKEND"):
+        build_runtime(_settings(tmp_path, exec_backend="firejail"))

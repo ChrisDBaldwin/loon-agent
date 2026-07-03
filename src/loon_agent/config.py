@@ -75,6 +75,25 @@ class Settings(BaseSettings):
     # the refusal message includes the sender's id, which is how you discover yours.
     telegram_allowed_users: str = ""
 
+    # Sandboxed exec/file capability (see exec/ and skills/code.md). Disabled by default:
+    # the /code skill's tools are only wired in when a backend is chosen. "docker" is the
+    # only isolation-backed option; there is deliberately no unsandboxed host-subprocess mode.
+    exec_backend: str = "off"  # off | docker
+    exec_workspace: Path = Path(".loon/workspace")
+    exec_image: str = ""  # required when exec_backend=docker; no default forces an explicit choice
+    exec_network: str = "none"  # none | bridge
+    exec_timeout: float = 120.0
+    exec_memory_limit: str = "512m"
+    exec_cpu_limit: float = 1.0
+    exec_pids_limit: int = 128
+    exec_user: str = "1000:1000"
+    # Comma-separated program names loon may run in the sandbox. Empty -> deny all (safe default).
+    exec_allowed_bins: str = ""
+
+    def exec_allowlist(self) -> frozenset[str]:
+        """Program names the sandbox may run (basename-matched; empty = deny all)."""
+        return frozenset(part.strip() for part in self.exec_allowed_bins.split(",") if part.strip())
+
     def telegram_allowlist(self) -> frozenset[int]:
         """Numeric user ids allowed to talk to the Telegram bot (empty = deny all)."""
         ids = set()

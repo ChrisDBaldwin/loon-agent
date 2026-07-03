@@ -162,3 +162,34 @@ def test_fetch_page_empty_extraction_is_error() -> None:
 def test_fetched_page_str_formats_source_block() -> None:
     page = FetchedPage(url="https://e.com", title="T", text="body")
     assert str(page).startswith("SOURCE: T\nURL: https://e.com\n")
+
+
+# --- chat-loop tool wrappers ----------------------------------------------------
+
+
+def test_chat_tools_registered_in_default_tools() -> None:
+    from loon_agent.tools import DEFAULT_TOOLS
+
+    names = {t.name for t in DEFAULT_TOOLS}
+    assert {"search_web", "read_web_page"} <= names
+    # The exec/file tools must never be in the chat-loop set.
+    assert not (names & {"run_command", "write_file", "edit_file", "delete_file"})
+
+
+def test_search_web_tool_formats_results() -> None:
+    from loon_agent.tools.builtins import search_web
+
+    with patch(
+        "loon_agent.tools.builtins.web_search",
+        return_value=[SearchResult(title="T", url="https://e.com", snippet="s")],
+    ):
+        out = search_web.invoke({"query": "loons"})
+    assert "https://e.com" in out
+
+
+def test_search_web_tool_handles_no_results() -> None:
+    from loon_agent.tools.builtins import search_web
+
+    with patch("loon_agent.tools.builtins.web_search", return_value=[]):
+        out = search_web.invoke({"query": "loons"})
+    assert "no results" in out

@@ -1,7 +1,13 @@
-"""A couple of trivial built-in tools to exercise the tool-calling loop.
+"""Built-in tools bound into the chat loop (``DEFAULT_TOOLS``).
 
-These exist mainly so the hand-rolled ReAct loop has something concrete to call and so
-tool-calling can be observed against each backend. Real tools come later.
+These are the tools reachable by the model on *every* chat turn. That is exactly why
+**exec/file tools must never be added here** — the chat loop also holds untrusted content
+returned by ``search_web``/``read_web_page`` below, so an exec tool sharing this loop would
+turn a prompt-injecting web page into remote code execution. Sandboxed exec lives only in
+the skill registry, behind the deliberately-invoked ``/code`` skill (see ``app.py``).
+
+Web search/fetch are read-only, so they are safe to expose conversationally — they wrap the
+same functions the research skill uses (``tools/web.py``).
 """
 
 from __future__ import annotations
@@ -11,6 +17,8 @@ import datetime as _dt
 import operator as _op
 
 from langchain_core.tools import tool
+
+from .web import fetch_page, web_search
 
 # Whitelisted operators for the calculator — never use eval() on model output.
 _BIN_OPS = {
@@ -54,4 +62,28 @@ def calculator(expression: str) -> str:
         return f"error: {exc}"
 
 
-DEFAULT_TOOLS = [get_current_time, calculator]
+@tool
+def search_web(query: str) -> str:
+    """Search the web for current information and return the top results.
+
+    Use this to look things up, research a topic, or answer questions that need
+    up-to-date information. Returns a list of results (title, URL, snippet).
+    """
+    results = web_search(query)
+    if not results:
+        return "no results (search unavailable or nothing found)"
+    return "\n\n".join(str(r) for r in results)
+
+
+@tool
+def read_web_page(url: str) -> str:
+    """Fetch a single web page by URL and return its readable text.
+
+    Use this after search_web to read a specific page in full. Returns the extracted
+    article text, or an error line if the page could not be fetched.
+    """
+    page = fetch_page(url)
+    return str(page)
+
+
+DEFAULT_TOOLS = [get_current_time, calculator, search_web, read_web_page]

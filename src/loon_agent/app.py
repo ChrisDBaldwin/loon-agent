@@ -16,6 +16,8 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from .config import Settings, get_settings
+from .exec.backend import ExecBackend
+from .exec.docker_backend import DockerExecBackend, DockerLimits
 from .graph import LoonAgent
 from .llm import make_llm
 from .masques import MasqueLoader
@@ -27,6 +29,7 @@ from .skills import Skill, discover_skills
 from .skills.engine import SkillRunner
 from .telemetry import setup_telemetry
 from .tools import DEFAULT_TOOLS
+from .tools.exec import delete_file, edit_file, run_command, write_file
 from .tools.web import FetchedPage, fetch_page, web_search
 
 _MEMORY_TLDR_CHARS = 400
@@ -96,6 +99,10 @@ def build_runtime(
         "fetch_page": _fetch_or_raise,
         "publish_report": _make_publish(memory, settings, model_label=backend.model),
     }
+    # Exec/file tools live ONLY in the skill registry (reachable via the /code skill),
+    # never in DEFAULT_TOOLS — the chat loop handles untrusted fetched web content, so an
+    # exec tool must never share that loop. Added only when a backend is configured.
+    tools.update(_exec_tools(settings))
     runner = SkillRunner(
         llm,
         tools,
@@ -156,6 +163,68 @@ def _fetch_or_raise(url: object) -> FetchedPage:
     if not page.ok:
         raise RuntimeError(page.error)
     return page
+
+
+def _make_exec_backend(settings: Settings) -> ExecBackend:
+    """Build the configured isolation backend, or fail loudly on misconfiguration."""
+    if settings.exec_backend == "docker":
+        if not settings.exec_image:
+            raise ValueError(
+                "LOON_EXEC_BACKEND=docker requires LOON_EXEC_IMAGE (a pinned toolbox image)."
+            )
+        return DockerExecBackend(
+            image=settings.exec_image,
+            limits=DockerLimits(
+                network=settings.exec_network,
+                memory=settings.exec_memory_limit,
+                cpus=settings.exec_cpu_limit,
+                pids=settings.exec_pids_limit,
+                user=settings.exec_user,
+            ),
+        )
+    raise ValueError(
+        f"Unknown LOON_EXEC_BACKEND {settings.exec_backend!r}; expected 'off' or 'docker'."
+    )
+
+
+def _exec_tools(settings: Settings) -> dict[str, Callable[[object], object]]:
+    """Exec/file tools for the skill registry — empty unless a backend is configured.
+
+    Unlike ``_fetch_or_raise``, these never raise: a denied or failed command is a
+    meaningful result for a coding task, so it flows into the step results (as an
+    error-carrying ``ExecResult``/``FileOpResult``) for the report step to surface —
+    the deny-and-report behavior. Registered only in the skill registry, never in
+    ``DEFAULT_TOOLS``.
+    """
+    if settings.exec_backend == "off":
+        return {}
+
+    backend = _make_exec_backend(settings)
+    workspace = Path(settings.exec_workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
+    allowed = settings.exec_allowlist()
+    timeout = settings.exec_timeout
+
+    return {
+        "run_command": lambda cmd: run_command(
+            str(cmd), backend=backend, workspace=workspace,
+            allowed_bins=allowed, timeout=timeout,
+        ),
+        "write_file": lambda item: write_file(
+            str(_field(item, "path")), str(_field(item, "content")), workspace=workspace
+        ),
+        "edit_file": lambda item: edit_file(
+            str(_field(item, "path")), str(_field(item, "content")), workspace=workspace
+        ),
+        "delete_file": lambda item: delete_file(str(_field(item, "path")), workspace=workspace),
+    }
+
+
+def _field(item: object, key: str) -> object:
+    """Pull a field from a foreach item that may be a mapping or a bare value."""
+    if isinstance(item, Mapping):
+        return item.get(key, "")
+    return item if key == "path" else ""
 
 
 def _make_publish(
