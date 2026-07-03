@@ -83,6 +83,8 @@ Both adapters speak the same slash commands (Telegram also shows them in its "/"
 | `/models`    | live numbered inventory: every chat model each configured backend's `/v1/models` reports (embedding models filtered out; dead backends noted) |
 | `/model <n>` | switch to model #n from the list — runtime-only, conversation/memory carry over, restart reverts to `.env` |
 | `/status`    | active backend + model, server reachability/latency, session thread + message count, memory backend, uptime |
+| `/don <name> [intent]` | become a persona — swaps prompt, tools, memory scope, credentials (details below) |
+| `/doff`      | return to baseline |
 | `/help`      | list the commands |
 
 Send `/don <masque> [intent]` to have the agent *become* a persona — one operation
