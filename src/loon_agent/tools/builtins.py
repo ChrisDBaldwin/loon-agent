@@ -8,6 +8,11 @@ the skill registry, behind the deliberately-invoked ``/code`` skill (see ``app.p
 
 Web search/fetch are read-only, so they are safe to expose conversationally — they wrap the
 same functions the research skill uses (``tools/web.py``).
+
+The chat loop also carries the site-management tools from ``tools/site.py`` (appended in
+``app.build_runtime``, not here, because they bind to the deployment's web root). They can
+share the loop because their writes are markdown-rendered pages confined to the web root —
+see that module's docstring for the full rationale.
 """
 
 from __future__ import annotations

@@ -78,3 +78,21 @@ def test_publish_page_registered_and_reports_go_to_web_root(tmp_path, monkeypatc
     from loon_agent.report import render_report, write_report
     write_report(render_report(topic="t", briefing_md="x", pages=[]), "t", web_root)
     assert list(web_root.glob("t-*.html"))
+
+
+def test_site_tools_bound_into_chat_loop(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOON_LOCAL_MODEL", "test-model")
+    web_root = tmp_path / "site"
+    runtime = build_runtime(_settings(tmp_path, web_root=web_root))
+    names = {t.name for t in runtime.agent.tools}
+    assert {
+        "list_site_pages",
+        "read_site_page",
+        "publish_site_page",
+        "update_site_page",
+        "delete_site_page",
+    } <= names
+    # And they operate on the configured web root.
+    publish = next(t for t in runtime.agent.tools if t.name == "publish_site_page")
+    publish.invoke({"title": "Wired", "markdown": "# Wired\n\nok."})
+    assert list(web_root.glob("wired-*.html"))

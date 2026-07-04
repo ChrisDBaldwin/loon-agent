@@ -49,6 +49,7 @@ from .telemetry import set_persona_attributes, setup_telemetry
 from .tools import DEFAULT_TOOLS
 from .tools.exec import delete_file, edit_file, run_command, write_file
 from .tools.publish import publish_page
+from .tools.site import site_base_url, site_tools
 from .tools.web import FetchedPage, fetch_page, web_search
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,9 @@ class LoonRuntime:
     base_memory: MemoryProvider | None = None
     masques: MasqueLoader | None = None
     baseline_persona: str | None = None  # settings.masque block, restored at doff
+    # The full chat-loop registry (DEFAULT_TOOLS + deployment-bound site tools) that
+    # don/doff rebuild from; falls back to DEFAULT_TOOLS when constructed bare in tests.
+    chat_tools: list[BaseTool] = field(default_factory=lambda: list(DEFAULT_TOOLS))
     credentials: CredentialResolver = field(default_factory=CredentialResolver)
     active_persona: Persona | None = None
     _mirror_active: dict | None = field(default=None, repr=False)
@@ -132,7 +136,7 @@ class LoonRuntime:
         if persona is None:
             return None
         plan, bound_refs = build_capability_plan(persona, HOST_SNAPSHOT)
-        tools = bound_tools(DEFAULT_TOOLS, persona)
+        tools = bound_tools(self.chat_tools, persona)
         memory = self.base_memory
         if memory is not None and persona.config is not None and persona.config.memory:
             memory = ScopedMemory(memory, persona.config.memory)
@@ -169,7 +173,7 @@ class LoonRuntime:
         set_persona_attributes(None)
         self.agent = LoonAgent(
             self.llm,
-            DEFAULT_TOOLS,
+            self.chat_tools,
             checkpointer=self.checkpointer,
             memory=self.base_memory,
             persona=self.baseline_persona,
@@ -248,12 +252,19 @@ def build_runtime(
     baseline_persona = masques.block(settings.masque) if settings.masque else None
 
     llm = make_llm(settings=settings)
+    # Chat loop = safe builtins + site management. Site tools write only markdown-rendered
+    # pages inside the web root (see tools/site.py), so unlike exec they may share the
+    # loop with untrusted fetched web content.
+    web_root = Path(settings.web_root)
+    chat_tools = [
+        *DEFAULT_TOOLS,
+        *site_tools(web_root, base_url=site_base_url(settings.web_port)),
+    ]
     agent = LoonAgent(
-        llm, DEFAULT_TOOLS, checkpointer=checkpointer, memory=memory, persona=baseline_persona
+        llm, chat_tools, checkpointer=checkpointer, memory=memory, persona=baseline_persona
     )
 
     backend = settings.resolve_backend()
-    web_root = Path(settings.web_root)
     tools = {
         "web_search": lambda query: web_search(str(query)),
         "fetch_page": _fetch_or_raise,
@@ -293,6 +304,7 @@ def build_runtime(
         base_memory=memory,
         masques=masques,
         baseline_persona=baseline_persona,
+        chat_tools=chat_tools,
     )
 
 

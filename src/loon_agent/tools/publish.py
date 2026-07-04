@@ -6,6 +6,10 @@ same escaping guarantees apply — the model writes markdown, never raw HTML.
 
 A plain function for the skill registry, in the ``tools/web.py`` mould: returns a frozen
 result carrying the served path (and any error) rather than raising.
+
+Each page's markdown source is also stored under ``.src/`` in the web root (hidden from
+the served gallery, which skips dotfiles) so the site tools (``tools/site.py``) can read
+it back for round-trip editing.
 """
 
 from __future__ import annotations
@@ -18,6 +22,13 @@ from pathlib import Path
 from ..report import render_page
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+SOURCE_DIR = ".src"
+
+
+def source_path_for(page_path: Path) -> Path:
+    """Where a served page's markdown source lives: ``<web_root>/.src/<stem>.md``."""
+    return page_path.parent / SOURCE_DIR / f"{page_path.stem}.md"
 
 
 @dataclass(frozen=True)
@@ -53,6 +64,9 @@ def publish_page(title: str, markdown: str, *, web_root: Path, subtitle: str = "
             path = root / f"{stem}-{counter}.html"
             counter += 1
         path.write_text(html_text, encoding="utf-8")
+        source = source_path_for(path)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(markdown, encoding="utf-8")
     except OSError as exc:
         return PublishResult(title=title, error=str(exc))
     return PublishResult(title=title, path=str(path))
