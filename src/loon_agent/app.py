@@ -47,7 +47,7 @@ from .skills import Skill, discover_skills
 from .skills.engine import SkillRunner
 from .telemetry import set_persona_attributes, setup_telemetry
 from .tools import DEFAULT_TOOLS
-from .tools.exec import delete_file, edit_file, run_command, write_file
+from .tools.exec import chat_exec_tools, delete_file, edit_file, run_command, write_file
 from .tools.publish import publish_page
 from .tools.site import site_base_url, site_tools
 from .tools.web import FetchedPage, fetch_page, web_search
@@ -252,14 +252,29 @@ def build_runtime(
     baseline_persona = masques.block(settings.masque) if settings.masque else None
 
     llm = make_llm(settings=settings)
-    # Chat loop = safe builtins + site management. Site tools write only markdown-rendered
-    # pages inside the web root (see tools/site.py), so unlike exec they may share the
-    # loop with untrusted fetched web content.
+    # Chat loop = safe builtins + site management (+ sandboxed exec when opted in).
+    # Site tools write only markdown-rendered pages inside the web root (tools/site.py);
+    # chat exec requires LOON_EXEC_CHAT=on and always runs with the network off, so a
+    # prompt-injecting web page in this loop can reach at most the workspace container.
     web_root = Path(settings.web_root)
     chat_tools = [
         *DEFAULT_TOOLS,
         *site_tools(web_root, base_url=site_base_url(settings.web_port)),
     ]
+    if settings.exec_chat:
+        if settings.exec_backend == "off":
+            raise ValueError("LOON_EXEC_CHAT=on requires LOON_EXEC_BACKEND=docker.")
+        chat_workspace = Path(settings.exec_workspace)
+        chat_workspace.mkdir(parents=True, exist_ok=True)
+        chat_tools.extend(
+            chat_exec_tools(
+                _make_exec_backend(settings, network="none"),
+                workspace=chat_workspace,
+                allowed_bins=settings.exec_allowlist(),
+                timeout=settings.exec_timeout,
+                ro_mounts=settings.exec_ro_mount_pairs(),
+            )
+        )
     agent = LoonAgent(
         llm, chat_tools, checkpointer=checkpointer, memory=memory, persona=baseline_persona
     )
@@ -352,8 +367,12 @@ def _fetch_or_raise(url: object) -> FetchedPage:
     return page
 
 
-def _make_exec_backend(settings: Settings) -> ExecBackend:
-    """Build the configured isolation backend, or fail loudly on misconfiguration."""
+def _make_exec_backend(settings: Settings, *, network: str | None = None) -> ExecBackend:
+    """Build the configured isolation backend, or fail loudly on misconfiguration.
+
+    ``network`` overrides ``LOON_EXEC_NETWORK`` — the chat-loop variant passes "none"
+    unconditionally, since that loop carries untrusted fetched web content.
+    """
     if settings.exec_backend == "docker":
         if not settings.exec_image:
             raise ValueError(
@@ -362,11 +381,12 @@ def _make_exec_backend(settings: Settings) -> ExecBackend:
         return DockerExecBackend(
             image=settings.exec_image,
             limits=DockerLimits(
-                network=settings.exec_network,
+                network=network if network is not None else settings.exec_network,
                 memory=settings.exec_memory_limit,
                 cpus=settings.exec_cpu_limit,
                 pids=settings.exec_pids_limit,
                 user=settings.exec_user,
+                ro_mounts=settings.exec_ro_mount_pairs(),
             ),
         )
     raise ValueError(

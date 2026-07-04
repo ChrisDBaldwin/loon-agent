@@ -10,10 +10,13 @@ from loon_agent.memory import ChromaMemoryProvider, SqliteMemoryProvider
 
 
 def _settings(tmp_path, *, memory_backend: str = "sqlite", exec_backend: str = "off", **kwargs):
-    # otel/memory_backend/exec_backend pinned explicitly: the real project .env sets
-    # LOON_OTEL=otlp and LOON_MEMORY_BACKEND=chroma, and pydantic-settings reads those
-    # ambient values for any field not passed here — pin everything these tests assert on
-    # so they don't depend on what happens to be in .env.
+    # otel/memory/exec fields pinned explicitly: the real project .env sets LOON_OTEL=otlp,
+    # LOON_MEMORY_BACKEND=chroma and the LOON_EXEC_* family, and pydantic-settings reads
+    # those ambient values for any field not passed here — pin everything these tests
+    # assert on so they don't depend on what happens to be in .env.
+    kwargs.setdefault("exec_chat", False)
+    kwargs.setdefault("exec_ro_mounts", "")
+    kwargs.setdefault("exec_image", "")
     return Settings(
         data_dir=tmp_path, backend="local", otel="off",
         memory_backend=memory_backend, exec_backend=exec_backend, **kwargs
@@ -96,3 +99,40 @@ def test_site_tools_bound_into_chat_loop(tmp_path, monkeypatch) -> None:
     publish = next(t for t in runtime.agent.tools if t.name == "publish_site_page")
     publish.invoke({"title": "Wired", "markdown": "# Wired\n\nok."})
     assert list(web_root.glob("wired-*.html"))
+
+
+def test_exec_chat_off_keeps_run_command_out_of_chat_loop(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOON_LOCAL_MODEL", "test-model")
+    runtime = build_runtime(_settings(tmp_path))
+    assert "run_command" not in {t.name for t in runtime.agent.tools}
+
+
+def test_exec_chat_wires_run_command_into_chat_loop(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOON_LOCAL_MODEL", "test-model")
+    runtime = build_runtime(
+        _settings(
+            tmp_path, exec_backend="docker", exec_chat=True,
+            exec_image="loon-toolbox:0.1", exec_allowed_bins="ls,cat",
+        )
+    )
+    names = {t.name for t in runtime.agent.tools}
+    assert "run_command" in names
+    # And don/doff rebuild from the same registry, so the tool survives a doff.
+    tool = next(t for t in runtime.agent.tools if t.name == "run_command")
+    assert "ls" in tool.description
+
+
+def test_exec_chat_without_backend_errors_helpfully(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOON_LOCAL_MODEL", "test-model")
+    with pytest.raises(ValueError, match="LOON_EXEC_CHAT"):
+        build_runtime(_settings(tmp_path, exec_chat=True))
+
+
+def test_chat_exec_backend_network_is_forced_off(tmp_path, monkeypatch) -> None:
+    from loon_agent.app import _make_exec_backend
+
+    settings = _settings(
+        tmp_path, exec_backend="docker", exec_image="img:1", exec_network="bridge"
+    )
+    assert _make_exec_backend(settings).limits.network == "bridge"
+    assert _make_exec_backend(settings, network="none").limits.network == "none"

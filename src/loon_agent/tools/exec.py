@@ -2,7 +2,10 @@
 
 These are plain functions (not LangChain ``@tool``s), in the same mould as ``tools/web.py``:
 error-as-value (never raise here — the ``app.py`` skill-registry wrappers decide raise-vs-skip),
-frozen-dataclass results with a ``__str__`` for prompt injection. Every call runs the
+frozen-dataclass results with a ``__str__`` for prompt injection. The one LangChain export is
+:func:`chat_exec_tools`, the opt-in (``LOON_EXEC_CHAT``) chat-loop wrapper around the same
+policy-checked ``run_command`` — see its docstring for why that carve-out is acceptable.
+Every call runs the
 :mod:`loon_agent.exec.policy` check *first* and records the verdict — plus command/exit/timing —
 onto the current OTel span (the ``execute_tool`` span the skill engine already opened), so there
 is an audit trail of everything loon tried to run or write, allowed or denied.
@@ -16,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from langchain_core.tools import BaseTool, StructuredTool
 from opentelemetry import trace
 
 from ..exec.backend import ExecBackend, ExecResult
@@ -128,3 +132,56 @@ def _do_delete(target: Path) -> None:
 
 def _missing(target: Path) -> None:
     raise OSError(f"no such file: {target.name}")
+
+
+# --- chat-loop exec (LOON_EXEC_CHAT) ----------------------------------------------
+
+
+def chat_exec_tools(
+    backend: ExecBackend,
+    *,
+    workspace: Path,
+    allowed_bins: frozenset[str],
+    timeout: float,
+    ro_mounts: tuple[tuple[str, str], ...] = (),
+) -> list[BaseTool]:
+    """The opt-in chat-loop ``run_command`` tool, sharing the skill tier's policy + audit.
+
+    The chat loop carries untrusted fetched web content, so exec may only appear here
+    because the blast radius is the container, not the host: ``app.py`` builds this
+    variant's backend with the network **forced to none** (regardless of
+    ``LOON_EXEC_NETWORK``), writes land only in the workspace mount, and the same
+    default-deny allowlist and hardline denylist run before anything spawns. A prompt-
+    injected command can therefore trash the workspace and burn a CPU-minute — nothing
+    else. Everything is still audited onto the active OTel span.
+    """
+    mounts_note = "".join(
+        f" Host directory {host} is mounted read-only at {container}."
+        for host, container in ro_mounts
+    )
+
+    def _run(command: str) -> str:
+        return str(
+            run_command(
+                command,
+                backend=backend,
+                workspace=workspace,
+                allowed_bins=allowed_bins,
+                timeout=timeout,
+            )
+        )
+
+    return [
+        StructuredTool.from_function(
+            _run,
+            name="run_command",
+            description=(
+                "Run one shell command in your isolated sandbox container (no network; "
+                "the working directory /workspace is the only writable place; only an "
+                "allowlisted set of programs will run — a refused command reports why). "
+                "Each command runs in a fresh container, so state like cd or shell "
+                f"variables does not persist between calls; use paths.{mounts_note} "
+                f"Allowed programs: {', '.join(sorted(allowed_bins)) or 'none configured'}."
+            ),
+        )
+    ]

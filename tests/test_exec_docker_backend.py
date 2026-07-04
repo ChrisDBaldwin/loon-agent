@@ -108,3 +108,51 @@ def test_network_is_off_by_default(tmp_path) -> None:
     )
     assert result.ok, result.error
     assert "NETFAIL" in result.stdout
+
+
+# --- read-only host mounts (LOON_EXEC_RO_MOUNTS) ---------------------------------
+
+
+def test_ro_mounts_appear_in_argv_as_readonly_volumes(tmp_path) -> None:
+    host = tmp_path / "repo-src"
+    host.mkdir()
+    backend = DockerExecBackend(
+        image="x", limits=DockerLimits(ro_mounts=((str(host), "/repo/src"),))
+    )
+    argv = backend._docker_run_argv("ls /repo/src", tmp_path / "ws")
+    mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "--volume"]
+    assert f"{(tmp_path / 'ws')}:/workspace:rw" in mounts[0]
+    assert f"{host.resolve()}:/repo/src:ro" in mounts
+    # The workspace stays the only writable mount.
+    assert [m for m in mounts if m.endswith(":rw")] == [f"{(tmp_path / 'ws')}:/workspace:rw"]
+
+
+def test_ro_mount_may_not_shadow_workspace(tmp_path) -> None:
+    with pytest.raises(ValueError, match="shadows the workspace"):
+        DockerExecBackend(
+            image="x", limits=DockerLimits(ro_mounts=((str(tmp_path), "/workspace"),))
+        )
+
+
+def test_ro_mount_host_path_must_exist(tmp_path) -> None:
+    with pytest.raises(ValueError, match="not an existing directory"):
+        DockerExecBackend(
+            image="x", limits=DockerLimits(ro_mounts=((str(tmp_path / "gone"), "/repo"),))
+        )
+
+
+@_DOCKER
+def test_ro_mount_is_readable_but_not_writable_in_container(tmp_path) -> None:
+    host = tmp_path / "shared"
+    host.mkdir()
+    (host / "note.txt").write_text("from-host", encoding="utf-8")
+    backend = DockerExecBackend(
+        image="alpine:3", limits=DockerLimits(ro_mounts=((str(host), "/repo/src"),))
+    )
+    result = backend.run(
+        "cat /repo/src/note.txt && (touch /repo/src/x 2>/dev/null || echo READONLY)",
+        cwd=tmp_path / "ws", timeout=60,
+    )
+    assert result.ok, result.error
+    assert "from-host" in result.stdout
+    assert "READONLY" in result.stdout

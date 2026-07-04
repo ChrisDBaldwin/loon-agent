@@ -46,3 +46,21 @@ def test_backend_without_model_errors_helpfully(monkeypatch) -> None:
     monkeypatch.delenv("LOON_LOCAL_MODEL", raising=False)
     with pytest.raises(ValueError, match="LOON_LOCAL_MODEL"):
         Settings().resolve_backend("local")
+
+
+def test_exec_ro_mounts_parse_and_default_empty() -> None:
+    # exec_ro_mounts pinned explicitly: the real project .env sets LOON_EXEC_RO_MOUNTS
+    # and pydantic-settings would otherwise read that ambient value (see test_app.py).
+    assert Settings(backend="local", exec_ro_mounts="").exec_ro_mount_pairs() == ()
+    settings = Settings(
+        backend="local",
+        exec_ro_mounts="/a/src:/repo/src, /b/docs:/repo/docs ,",
+    )
+    assert settings.exec_ro_mount_pairs() == (("/a/src", "/repo/src"), ("/b/docs", "/repo/docs"))
+
+
+def test_exec_ro_mounts_malformed_entry_is_loud() -> None:
+    with pytest.raises(ValueError, match="LOON_EXEC_RO_MOUNTS"):
+        Settings(backend="local", exec_ro_mounts="/a/src").exec_ro_mount_pairs()
+    with pytest.raises(ValueError, match="absolute container path"):
+        Settings(backend="local", exec_ro_mounts="/a/src:relative").exec_ro_mount_pairs()

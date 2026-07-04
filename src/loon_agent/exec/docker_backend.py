@@ -4,8 +4,10 @@ Each :meth:`DockerExecBackend.run` spawns one ephemeral, locked-down container
 (``docker run --rm``) and tears it down when the command finishes. The hardening is all in
 the ``docker run`` flags, not in anything trusted to run inside:
 
-* exactly one bind mount, the workspace at ``/workspace`` — never the Docker socket, host
-  secrets, or loon's own source (the AutoGPT container-escape lesson);
+* one read-write bind mount, the workspace at ``/workspace``, plus optional **read-only**
+  mounts from the curated ``LOON_EXEC_RO_MOUNTS`` allowlist — never the Docker socket or
+  host secrets (the AutoGPT container-escape lesson). Each ro mount is an explicit,
+  operator-made trust decision (e.g. loon's own repo at ``/repo`` so it can read its code);
 * ``--network`` off by default; non-root user; read-only root filesystem with a writable
   ``/tmp`` tmpfs so only the workspace persists; memory / cpu / pid limits (pid-limit is a
   fork-bomb floor beneath the policy layer);
@@ -40,6 +42,9 @@ class DockerLimits:
     cpus: float = 1.0
     pids: int = 128
     user: str = "1000:1000"
+    # (host, container) dirs mounted read-only alongside the workspace. Container paths
+    # must not shadow /workspace — validated at construction, not trusted to callers.
+    ro_mounts: tuple[tuple[str, str], ...] = ()
 
 
 class DockerExecBackend(ExecBackend):
@@ -50,9 +55,21 @@ class DockerExecBackend(ExecBackend):
             raise ValueError("DockerExecBackend requires an image (set LOON_EXEC_IMAGE).")
         self.image = image
         self.limits = limits or DockerLimits()
+        for host, container in self.limits.ro_mounts:
+            if container.rstrip("/") in ("", _WORKDIR):
+                raise ValueError(
+                    f"ro mount {host!r} may not target {container!r} (shadows the workspace)"
+                )
+            if not Path(host).is_dir():
+                raise ValueError(f"ro mount host path {host!r} is not an existing directory")
 
     def _docker_run_argv(self, command: str, workspace: Path) -> list[str]:
         limits = self.limits
+        ro_volumes = [
+            arg
+            for host, container in limits.ro_mounts
+            for arg in ("--volume", f"{Path(host).resolve()}:{container}:ro")
+        ]
         return [
             _DOCKER, "run", "--rm",
             "--network", limits.network,
@@ -62,8 +79,9 @@ class DockerExecBackend(ExecBackend):
             "--memory", limits.memory,
             "--cpus", str(limits.cpus),
             "--pids-limit", str(limits.pids),
-            # The single mount: the workspace, read-write, and nothing else.
+            # The one writable mount: the workspace. Anything else arrives read-only below.
             "--volume", f"{workspace}:{_WORKDIR}:rw",
+            *ro_volumes,
             "--workdir", _WORKDIR,
             self.image,
             # Run the command through a shell inside the container so pipes/redirects work,

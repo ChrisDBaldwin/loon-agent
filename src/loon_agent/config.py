@@ -89,6 +89,14 @@ class Settings(BaseSettings):
     exec_user: str = "1000:1000"
     # Comma-separated program names loon may run in the sandbox. Empty -> deny all (safe default).
     exec_allowed_bins: str = ""
+    # Also expose sandboxed run_command in the chat loop (not just the /code skill). The
+    # chat loop carries untrusted web content, so this variant always runs with the
+    # network locked to "none" regardless of exec_network — see docs/exec-sandbox.md.
+    exec_chat: bool = False
+    # Comma-separated read-only bind mounts "host:container" (e.g. the loon repo at
+    # /repo). Empty -> the sandbox sees only the workspace. Curated allowlist, not a
+    # general host-FS door: each entry is an explicit trust decision.
+    exec_ro_mounts: str = ""
 
     # Internal website (see adapters/web.py): serves the HTML loon publishes over the LAN.
     # host 0.0.0.0 makes it reachable network-wide (e.g. http://pontoon.local:8800), not just
@@ -100,6 +108,23 @@ class Settings(BaseSettings):
     def exec_allowlist(self) -> frozenset[str]:
         """Program names the sandbox may run (basename-matched; empty = deny all)."""
         return frozenset(part.strip() for part in self.exec_allowed_bins.split(",") if part.strip())
+
+    def exec_ro_mount_pairs(self) -> tuple[tuple[str, str], ...]:
+        """Parsed (host, container) read-only mounts. Malformed entries raise ValueError —
+        a mount is a trust boundary, so misconfiguration must be loud, not skipped."""
+        pairs = []
+        for entry in self.exec_ro_mounts.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            host, sep, container = entry.rpartition(":")
+            if not sep or not host or not container.startswith("/"):
+                raise ValueError(
+                    f"LOON_EXEC_RO_MOUNTS entry {entry!r} is not 'host:container' "
+                    "with an absolute container path"
+                )
+            pairs.append((host, container))
+        return tuple(pairs)
 
     def telegram_allowlist(self) -> frozenset[int]:
         """Numeric user ids allowed to talk to the Telegram bot (empty = deny all)."""

@@ -1,10 +1,13 @@
 """Built-in tools bound into the chat loop (``DEFAULT_TOOLS``).
 
 These are the tools reachable by the model on *every* chat turn. That is exactly why
-**exec/file tools must never be added here** — the chat loop also holds untrusted content
-returned by ``search_web``/``read_web_page`` below, so an exec tool sharing this loop would
-turn a prompt-injecting web page into remote code execution. Sandboxed exec lives only in
-the skill registry, behind the deliberately-invoked ``/code`` skill (see ``app.py``).
+**unsandboxed exec/file tools must never be added here** — the chat loop also holds
+untrusted content returned by ``search_web``/``read_web_page`` below, so a host-level exec
+tool sharing this loop would turn a prompt-injecting web page into remote code execution.
+Exec reaches the chat loop only in its sandboxed form, only by explicit opt-in
+(``LOON_EXEC_CHAT=on``), and only with the container network forced off — see
+``tools/exec.py:chat_exec_tools``. The full exec/file toolset otherwise lives in the skill
+registry behind the deliberately-invoked ``/code`` skill (see ``app.py``).
 
 Web search/fetch are read-only, so they are safe to expose conversationally — they wrap the
 same functions the research skill uses (``tools/web.py``).
