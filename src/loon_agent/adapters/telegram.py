@@ -32,9 +32,14 @@ from ..commands import (
     status_text,
 )
 from ..config import get_settings
+from ..loops import LoopSpec, run_iteration
 from ..session import MessageEvent, SessionSource, build_session_key
 
 logger = logging.getLogger(__name__)
+
+# A loop stops itself after this many consecutive failed iterations — a broken backend
+# should not be retried unattended forever.
+_LOOP_MAX_FAILURES = 3
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 _TYPING_REFRESH_SECONDS = 4.0
@@ -96,6 +101,148 @@ def _source_of(message: object, user: object, chat: object) -> SessionSource:
     )
 
 
+class LoopManager:
+    """Drives processing loops (``loops.py``) through the shared agent.
+
+    One asyncio task per running loop, living on the bot's event loop: sleep the
+    interval, take the turn lock (so a loop iteration and a user turn never hit the
+    single local model concurrently), run one iteration in a worker thread, deliver
+    the reply to the chat that started the loop. Run state persists in the
+    ``LoopStore``, so ``resume()`` picks up mid-run loops after a service restart.
+
+    ``stop()`` cancels between iterations; an iteration already running in its worker
+    thread finishes there but its reply is dropped.
+    """
+
+    def __init__(self, runtime: LoonRuntime, turn_lock: asyncio.Lock) -> None:
+        self.runtime = runtime
+        self.turn_lock = turn_lock
+        self._tasks: dict[str, asyncio.Task] = {}
+
+    def status_text(self) -> str:
+        loops = self.runtime.loops
+        if not loops:
+            return "no loops defined — add loop files under loops/*.md."
+        lines = ["Loops (/loop start <name> · /loop stop <name>):"]
+        for name, spec in sorted(loops.items()):
+            run = self.runtime.loop_store.get(name) if self.runtime.loop_store else None
+            task = self._tasks.get(name)
+            if task is not None and not task.done():
+                state = (
+                    f"running, iteration {run.iteration}/{spec.max_iterations}"
+                    if run
+                    else "running"
+                )
+            else:
+                state = run.status if run else "never run"
+            lines.append(
+                f"• {name} — every {spec.interval:.0f}s, "
+                f"≤{spec.max_iterations} iterations [{state}]"
+            )
+            if spec.description:
+                lines.append(f"    {spec.description}")
+        return "\n".join(lines)
+
+    def start(self, name: str, chat_id: int, bot: Bot) -> str:
+        spec = self.runtime.loops.get(name)
+        if spec is None:
+            known = ", ".join(sorted(self.runtime.loops)) or "none defined"
+            return f"no loop named {name!r} (loops: {known})."
+        task = self._tasks.get(name)
+        if task is not None and not task.done():
+            return f"loop {name!r} is already running — /loop stop {name} first."
+        self.runtime.loop_store.activate(name, str(chat_id))
+        self._spawn(spec, chat_id, bot, start_iteration=0)
+        return (
+            f"loop {name!r} started — one iteration now, then every {spec.interval:.0f}s, "
+            f"up to {spec.max_iterations} iterations. /loop stop {name} to stop."
+        )
+
+    def stop(self, name: str) -> str:
+        task = self._tasks.pop(name, None)
+        if task is None or task.done():
+            return f"loop {name!r} is not running."
+        task.cancel()
+        self.runtime.loop_store.finish(name, "stopped")
+        return f"loop {name!r} stopped."
+
+    def resume(self, bot: Bot) -> None:
+        """Restart loops the previous process left mid-run (called once at startup)."""
+        if self.runtime.loop_store is None:
+            return
+        for run in self.runtime.loop_store.running():
+            spec = self.runtime.loops.get(run.name)
+            if spec is None:
+                logger.warning("stored loop %r has no definition — marking failed", run.name)
+                self.runtime.loop_store.finish(run.name, "failed")
+                continue
+            logger.info("resuming loop %s at iteration %d", run.name, run.iteration)
+            self._spawn(spec, int(run.chat_id), bot, start_iteration=run.iteration)
+
+    def _spawn(self, spec: LoopSpec, chat_id: int, bot: Bot, *, start_iteration: int) -> None:
+        self._tasks[spec.name] = asyncio.create_task(
+            self._run(spec, chat_id, bot, start_iteration), name=f"loop:{spec.name}"
+        )
+
+    async def _run(self, spec: LoopSpec, chat_id: int, bot: Bot, start_iteration: int) -> None:
+        store = self.runtime.loop_store
+        iteration = start_iteration
+        failures = 0
+        while iteration < spec.max_iterations:
+            iteration += 1
+            result = None
+            try:
+                async with self.turn_lock:
+                    result = await asyncio.to_thread(
+                        run_iteration, self.runtime.agent, spec, iteration
+                    )
+                failures = 0
+            except asyncio.CancelledError:
+                raise  # stop() already recorded the status
+            except Exception:
+                logger.exception("loop %s iteration %d failed", spec.name, iteration)
+                failures += 1
+            store.record_iteration(spec.name, iteration)
+            if result is not None:
+                await self._deliver(
+                    bot,
+                    chat_id,
+                    f"[{spec.name} #{iteration}/{spec.max_iterations}]\n{result.reply}",
+                )
+                if result.done:
+                    store.finish(spec.name, "done")
+                    await self._deliver(
+                        bot,
+                        chat_id,
+                        f"loop {spec.name!r} finished — it declared itself done at "
+                        f"iteration {iteration}.",
+                    )
+                    return
+            elif failures >= _LOOP_MAX_FAILURES:
+                store.finish(spec.name, "failed")
+                await self._deliver(
+                    bot,
+                    chat_id,
+                    f"loop {spec.name!r} stopped after {failures} consecutive failed "
+                    "iterations — check the loon logs.",
+                )
+                return
+            await asyncio.sleep(spec.interval)
+        store.finish(spec.name, "done")
+        await self._deliver(
+            bot, chat_id, f"loop {spec.name!r} reached its {spec.max_iterations}-iteration cap."
+        )
+
+    async def _deliver(self, bot: Bot, chat_id: int, text: str) -> None:
+        for chunk in chunk_message(text) or []:
+            try:
+                await bot.send_message(chat_id, chunk)
+            except Exception:
+                # Delivery is best-effort; the loop's real output lives on the site /
+                # in follow-ups, so a Telegram hiccup must not kill the run.
+                logger.exception("loop delivery to chat %s failed", chat_id)
+
+
 class LoonTelegramBot:
     """Handlers binding a :class:`LoonRuntime` to a Telegram bot."""
 
@@ -103,6 +250,9 @@ class LoonTelegramBot:
         self.runtime = runtime
         self.allowlist = allowlist
         self._last_text: dict[str, str] = {}  # base session key -> last user message
+        # One turn at a time — user turns and loop iterations share a single local model.
+        self.turn_lock = asyncio.Lock()
+        self.loop_manager = LoopManager(runtime, self.turn_lock)
 
     async def _gate(self, update: Update):
         """Common preamble: unpack the update and enforce the allowlist.
@@ -213,6 +363,24 @@ class LoonTelegramBot:
         persona = await asyncio.to_thread(self.runtime.doff)
         await gated[0].reply_text("baseline restored." if persona else "no masque was active.")
 
+    async def on_loop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/loop [list|start <name>|stop <name>] — manage self-directed processing loops."""
+        if not (gated := await self._gate(update)):
+            return
+        message, _user, chat = gated
+        args = context.args if context is not None and context.args else []
+        if not args or args[0] == "list":
+            await message.reply_text(self.loop_manager.status_text())
+            return
+        action, name = args[0], args[1] if len(args) > 1 else ""
+        if action == "start" and name:
+            reply = self.loop_manager.start(name, chat.id, context.bot)
+        elif action == "stop" and name:
+            reply = self.loop_manager.stop(name)
+        else:
+            reply = "usage: /loop [list] · /loop start <name> · /loop stop <name>"
+        await message.reply_text(reply)
+
     async def on_retry(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """/retry — send the previous message again (fresh roll on a flaky local model)."""
         if not (gated := await self._gate(update)):
@@ -254,13 +422,16 @@ class LoonTelegramBot:
         event = MessageEvent(source=source, text=text)
 
         async with _typing(context.bot, chat.id):
-            try:
-                reply = await asyncio.to_thread(
-                    self.runtime.agent.invoke, event.text, session_key
-                )
-            except Exception:
-                logger.exception("turn failed (session=%s)", session_key)
-                reply = _ERROR_REPLY
+            # The shared turn lock serializes this with any running loop iteration; the
+            # typing indicator stays alive while we wait for the model to free up.
+            async with self.turn_lock:
+                try:
+                    reply = await asyncio.to_thread(
+                        self.runtime.agent.invoke, event.text, session_key
+                    )
+                except Exception:
+                    logger.exception("turn failed (session=%s)", session_key)
+                    reply = _ERROR_REPLY
 
         for chunk in chunk_message(reply) or ["(no reply)"]:
             await message.reply_text(chunk)
@@ -301,13 +472,14 @@ def run_telegram() -> None:
                 BotCommand("status", "backend, server health, session info"),
                 BotCommand("don", "become a persona: /don <name> [intent]"),
                 BotCommand("doff", "return to baseline"),
+                BotCommand("loop", "processing loops: /loop start|stop <name>"),
                 BotCommand("help", "list commands"),
             ]
         )
+        # Pick up loops the previous process left mid-run (kickstart restarts).
+        bot.loop_manager.resume(app.bot)
 
-    application = (
-        Application.builder().token(settings.telegram_token).post_init(_post_init).build()
-    )
+    application = Application.builder().token(settings.telegram_token).post_init(_post_init).build()
     application.add_handler(CommandHandler("start", bot.on_start))
     application.add_handler(CommandHandler("help", bot.on_help))
     application.add_handler(CommandHandler("status", bot.on_status))
@@ -317,6 +489,7 @@ def run_telegram() -> None:
     application.add_handler(CommandHandler("retry", bot.on_retry))
     application.add_handler(CommandHandler("don", bot.on_don))
     application.add_handler(CommandHandler("doff", bot.on_doff))
+    application.add_handler(CommandHandler("loop", bot.on_loop))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.on_message))
 
     print(f"loon telegram bot up — backend={settings.backend}, allowed users={len(allowlist)}")

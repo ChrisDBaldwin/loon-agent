@@ -29,6 +29,7 @@ HELP_TEXT = """loon — commands:
 /model <n> — switch to model #n from /models (until restart)
 /don <name> [intent] — become a persona (prompt + tools + memory)
 /doff — return to baseline
+/loop — list self-directed processing loops; /loop start|stop <name>
 /status — backend, model, server health, session info
 /help — this text
 

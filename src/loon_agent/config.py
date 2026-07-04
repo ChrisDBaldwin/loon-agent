@@ -63,6 +63,8 @@ class Settings(BaseSettings):
 
     # Skills + masques (see docs/spec-research-skills.md).
     skills_dir: Path = Path("skills")
+    # Self-directed processing loops (see docs/loops.md).
+    loops_dir: Path = Path("loops")
     masques_dir: Path | None = None  # extra masque catalog (a masques-style personas dir)
     masque: str | None = None  # optional lens donned by the chat agent itself
     step_input_budget: int = 4000  # approx tokens per assembled skill-step prompt

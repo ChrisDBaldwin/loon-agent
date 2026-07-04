@@ -8,8 +8,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from loon_agent.adapters.telegram import LoonTelegramBot, chunk_message, normalize_chat_type
+from loon_agent.adapters.telegram import (
+    LoonTelegramBot,
+    LoopManager,
+    chunk_message,
+    normalize_chat_type,
+)
 from loon_agent.config import Settings
+from loon_agent.loops import LoopSpec, LoopStore
 
 # --- chunking -----------------------------------------------------------------
 
@@ -154,3 +160,133 @@ def test_start_command_tells_stranger_their_id() -> None:
 
     (reply,), _ = update.effective_message.reply_text.await_args
     assert "4242" in reply
+
+
+# --- processing loops --------------------------------------------------------------
+
+
+def _loop_spec(**overrides) -> LoopSpec:
+    defaults = dict(name="a", description="", interval=0.01, max_iterations=5, prompt="p")
+    return LoopSpec(**{**defaults, **overrides})
+
+
+def _loop_runtime(tmp_path, agent, specs) -> SimpleNamespace:
+    return SimpleNamespace(
+        agent=agent, loops=specs, loop_store=LoopStore(tmp_path / "loops.sqlite")
+    )
+
+
+def test_loop_runs_to_done_and_delivers_each_iteration(tmp_path) -> None:
+    replies = iter(["looked at one thing\nLOOP_CONTINUE", "all covered\nLOOP_DONE"])
+    agent = SimpleNamespace(invoke=lambda text, key: next(replies))
+    runtime = _loop_runtime(tmp_path, agent, {"a": _loop_spec()})
+    bot = AsyncMock()
+
+    async def drive() -> None:
+        manager = LoopManager(runtime, asyncio.Lock())
+        assert "no loop named" in manager.start("nope", 555, bot)
+        assert "started" in manager.start("a", 555, bot)
+        assert "already running" in manager.start("a", 555, bot)
+        await manager._tasks["a"]
+
+    asyncio.run(drive())
+    assert runtime.loop_store.get("a").status == "done"
+    assert runtime.loop_store.get("a").iteration == 2
+    texts = [call.args[1] for call in bot.send_message.await_args_list]
+    assert any("looked at one thing" in t for t in texts)
+    assert any("finished" in t for t in texts)
+
+
+def test_loop_stops_at_iteration_cap(tmp_path) -> None:
+    agent = SimpleNamespace(invoke=lambda text, key: "still going\nLOOP_CONTINUE")
+    runtime = _loop_runtime(tmp_path, agent, {"a": _loop_spec(max_iterations=2)})
+    bot = AsyncMock()
+
+    async def drive() -> None:
+        manager = LoopManager(runtime, asyncio.Lock())
+        manager.start("a", 555, bot)
+        await manager._tasks["a"]
+
+    asyncio.run(drive())
+    assert runtime.loop_store.get("a").iteration == 2
+    texts = [call.args[1] for call in bot.send_message.await_args_list]
+    assert any("cap" in t for t in texts)
+
+
+def test_loop_gives_up_after_consecutive_failures(tmp_path) -> None:
+    def boom(text: str, key: str) -> str:
+        raise RuntimeError("backend down")
+
+    runtime = _loop_runtime(tmp_path, SimpleNamespace(invoke=boom), {"a": _loop_spec()})
+    bot = AsyncMock()
+
+    async def drive() -> None:
+        manager = LoopManager(runtime, asyncio.Lock())
+        manager.start("a", 555, bot)
+        await manager._tasks["a"]
+
+    asyncio.run(drive())
+    assert runtime.loop_store.get("a").status == "failed"
+    assert runtime.loop_store.get("a").iteration == 3  # _LOOP_MAX_FAILURES
+
+
+def test_loop_stop_cancels_between_iterations(tmp_path) -> None:
+    agent = SimpleNamespace(invoke=lambda text, key: "one\nLOOP_CONTINUE")
+    runtime = _loop_runtime(tmp_path, agent, {"a": _loop_spec(interval=60.0)})
+    bot = AsyncMock()
+
+    async def drive() -> None:
+        manager = LoopManager(runtime, asyncio.Lock())
+        assert "not running" in manager.stop("a")
+        manager.start("a", 555, bot)
+        task = manager._tasks["a"]
+        await asyncio.sleep(0.3)  # let iteration 1 finish; the loop is now in its sleep
+        assert "stopped" in manager.stop("a")
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(drive())
+    assert runtime.loop_store.get("a").status == "stopped"
+    assert runtime.loop_store.get("a").iteration == 1
+
+
+def test_loop_resume_picks_up_mid_run_state(tmp_path) -> None:
+    agent = SimpleNamespace(invoke=lambda text, key: "wrap up\nLOOP_DONE")
+    runtime = _loop_runtime(tmp_path, agent, {"a": _loop_spec()})
+    runtime.loop_store.activate("a", "555")
+    runtime.loop_store.record_iteration("a", 3)
+    runtime.loop_store.activate("ghost", "555")  # stored but no definition on disk
+    bot = AsyncMock()
+
+    async def drive() -> None:
+        manager = LoopManager(runtime, asyncio.Lock())
+        manager.resume(bot)
+        assert "ghost" not in manager._tasks
+        await manager._tasks["a"]
+
+    asyncio.run(drive())
+    assert runtime.loop_store.get("a").status == "done"
+    assert runtime.loop_store.get("a").iteration == 4  # resumed after the stored 3
+    assert runtime.loop_store.get("ghost").status == "failed"
+
+
+def test_on_loop_command_lists_and_validates(tmp_path) -> None:
+    runtime = _runtime()
+    runtime.loops = {"a": _loop_spec()}
+    runtime.loop_store = LoopStore(tmp_path / "loops.sqlite")
+    bot = LoonTelegramBot(runtime, allowlist=frozenset({99}))
+
+    update = _update(user_id=99)
+    asyncio.run(bot.on_loop(update, SimpleNamespace(args=[], bot=AsyncMock())))
+    (listing,), _ = update.effective_message.reply_text.await_args
+    assert "a — every" in listing
+
+    update = _update(user_id=99)
+    asyncio.run(bot.on_loop(update, SimpleNamespace(args=["bogus"], bot=AsyncMock())))
+    (usage,), _ = update.effective_message.reply_text.await_args
+    assert "usage" in usage
+
+    update = _update(user_id=99)
+    asyncio.run(bot.on_loop(update, SimpleNamespace(args=["stop", "a"], bot=AsyncMock())))
+    (reply,), _ = update.effective_message.reply_text.await_args
+    assert "not running" in reply

@@ -85,6 +85,7 @@ Both adapters speak the same slash commands (Telegram also shows them in its "/"
 | `/status`    | active backend + model, server reachability/latency, session thread + message count, memory backend, uptime |
 | `/don <name> [intent]` | become a persona — swaps prompt, tools, memory scope, credentials (details below) |
 | `/doff`      | return to baseline |
+| `/loop`      | self-directed processing loops: `/loop` lists them, `/loop start\|stop <name>` runs/halts one (Telegram only — needs the persistent poller; see `docs/loops.md`) |
 | `/help`      | list the commands |
 
 Send `/don <masque> [intent]` to have the agent *become* a persona — one operation
@@ -248,6 +249,7 @@ Each axis of growth has its own seam — you rarely touch the core loop:
 |------------------|-------------------------------------------------------------------------------------------|
 | Add a tool       | Write an `@tool` in `tools/builtins.py`, add it to `DEFAULT_TOOLS`.                        |
 | Add a skill      | Drop a markdown file in `skills/` (frontmatter steps + `## step:` templates).             |
+| Add a loop       | Drop a markdown file in `loops/` (frontmatter cadence + iteration prompt); `/loop start <name>` (see `docs/loops.md`). |
 | Add a masque     | Drop a `name`/`lens`/`context` YAML in `masques/`, reference it from a skill step.        |
 | Add a skill tool | Register a callable in `build_runtime()`'s registry (`app.py`).                           |
 | Add a backend    | Add to `DEFAULT_BACKENDS` in `config.py`, or set `LOON_<NAME>_*` in `.env`.               |
@@ -259,6 +261,7 @@ Each axis of growth has its own seam — you rarely touch the core loop:
 
 ```
 skills/         markdown skill definitions (research.md)
+loops/          self-directed processing loops (self-audit.md)
 masques/        loon-local masque lenses (analyst, briefer)
 src/loon_agent/
   config.py     backend registry + settings
@@ -268,6 +271,7 @@ src/loon_agent/
   app.py        build_agent()/build_runtime() — llm, tools, memory, skills, masques
   tools/        @tool definitions (DEFAULT_TOOLS) + web.py (search/fetch)
   skills/       skill model (markdown parser) + deterministic engine
+  loops.py      processing loops: loop specs, iteration protocol, run persistence
   masques.py    MasqueLoader (name/lens/context YAML)
   report.py     markdown briefing -> self-contained HTML report
   textbudget.py chars/4 token budgeting + truncation

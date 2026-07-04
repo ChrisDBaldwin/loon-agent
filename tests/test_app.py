@@ -101,6 +101,24 @@ def test_site_tools_bound_into_chat_loop(tmp_path, monkeypatch) -> None:
     assert list(web_root.glob("wired-*.html"))
 
 
+def test_followup_tools_bound_into_chat_loop(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOON_LOCAL_MODEL", "test-model")
+    runtime = build_runtime(_settings(tmp_path))
+    names = {t.name for t in runtime.agent.tools}
+    assert {"add_followup", "list_followups", "resolve_followup"} <= names
+    add = next(t for t in runtime.agent.tools if t.name == "add_followup")
+    assert "#1" in add.invoke({"topic": "wired", "note": "store lives in data_dir"})
+    assert (tmp_path / "followups.sqlite").exists()
+
+
+def test_loops_discovered_and_store_wired(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOON_LOCAL_MODEL", "test-model")
+    runtime = build_runtime(_settings(tmp_path))  # loops_dir defaults to the repo's loops/
+    assert "self-audit" in runtime.loops
+    assert runtime.loop_store is not None
+    assert (tmp_path / "loops.sqlite").exists()
+
+
 def test_exec_chat_off_keeps_run_command_out_of_chat_loop(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("LOON_LOCAL_MODEL", "test-model")
     runtime = build_runtime(_settings(tmp_path))

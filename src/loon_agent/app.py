@@ -37,6 +37,7 @@ from .exec.backend import ExecBackend
 from .exec.docker_backend import DockerExecBackend, DockerLimits
 from .graph import LoonAgent
 from .llm import make_llm
+from .loops import LoopSpec, LoopStore, discover_loops
 from .masques import MasqueLoader
 from .memory import ChromaMemoryProvider, ScopedMemory, SqliteMemoryProvider
 from .memory.provider import MemoryProvider
@@ -48,6 +49,7 @@ from .skills.engine import SkillRunner
 from .telemetry import set_persona_attributes, setup_telemetry
 from .tools import DEFAULT_TOOLS
 from .tools.exec import chat_exec_tools, delete_file, edit_file, run_command, write_file
+from .tools.followups import FollowupStore, followup_tools
 from .tools.publish import publish_page
 from .tools.site import site_base_url, site_tools
 from .tools.web import FetchedPage, fetch_page, web_search
@@ -122,6 +124,10 @@ class LoonRuntime:
     # don/doff rebuild from; falls back to DEFAULT_TOOLS when constructed bare in tests.
     chat_tools: list[BaseTool] = field(default_factory=lambda: list(DEFAULT_TOOLS))
     credentials: CredentialResolver = field(default_factory=CredentialResolver)
+    # Self-directed processing loops: definitions (loops/*.md) and run persistence.
+    # An adapter with a persistent event loop drives them (see adapters/telegram.py).
+    loops: dict[str, LoopSpec] = field(default_factory=dict)
+    loop_store: LoopStore | None = None
     active_persona: Persona | None = None
     _mirror_active: dict | None = field(default=None, repr=False)
     _mirror_previous: dict | None = field(default=None, repr=False)
@@ -260,6 +266,8 @@ def build_runtime(
     chat_tools = [
         *DEFAULT_TOOLS,
         *site_tools(web_root, base_url=site_base_url(settings.web_port)),
+        # Durable notes-to-self, shared between chat turns and processing loops.
+        *followup_tools(FollowupStore(data_dir / "followups.sqlite")),
     ]
     if settings.exec_chat:
         if settings.exec_backend == "off":
@@ -312,6 +320,8 @@ def build_runtime(
         runner=runner,
         settings=settings,
         epochs=SessionEpochs(data_dir / "sessions.sqlite"),
+        loops=discover_loops(settings.loops_dir),
+        loop_store=LoopStore(data_dir / "loops.sqlite"),
         active_backend=settings.backend,
         active_model=backend.model,
         llm=llm,
