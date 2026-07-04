@@ -21,10 +21,16 @@ This iteration:
 2. Pick ONE area not yet covered and investigate it. If `run_command` is available,
    your own source code is mounted read-only at /repo — inspect the real code and
    configuration (`ls /repo`, `cat`, `grep -r`). Otherwise reason from what you know
-   about your setup.
-3. For each concrete weakness, gap, or risk you find, record it with
+   about your setup. Ground every specific claim in what you actually read this
+   iteration — if you assert a function, pattern, or call appears "in several places"
+   or "throughout" the code, confirm it with `grep -rn` first. Do not state something
+   as fact because it's a common pattern in similar systems; state only what you
+   verified in *this* code.
+3. For each concrete weakness, gap, or risk you actually verified, record it with
    `add_followup(topic, note)` — topic is a short label, the note says what is weak
-   and what a fix might look like. These are for your human to follow up on.
+   and what a fix might look like. Follow-ups are for real findings only — never
+   record loop bookkeeping (e.g. "starting the audit", "no report exists yet") as a
+   follow-up; that belongs in your reply, not in the human's to-do list.
 4. Update the running report: the first iteration publishes a new page titled
    "Self-Audit" (`publish_site_page`); later iterations rewrite the existing page
    (`update_site_page`) adding a section for the area just audited, so the page reads
